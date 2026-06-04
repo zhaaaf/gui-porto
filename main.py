@@ -1,6 +1,6 @@
 """
-Portfolio Diversification – Strategic, Tactical & Downside Variance
-Gabungan tiga model dalam satu aplikasi Streamlit
+Portfolio Diversification – Strategic, Tactical, Downside Variance & Piecewise Linear
+Gabungan empat model dalam satu aplikasi Streamlit
 
 Jalankan dengan:
     python -m streamlit run app.py
@@ -13,6 +13,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize, Bounds, LinearConstraint
+from pulp import (
+    LpProblem, LpMinimize, LpVariable, LpStatus,
+    lpSum, value, PULP_CBC_CMD
+)
 
 # ══════════════════════════════════════════════════════════════════════
 # KONFIGURASI HALAMAN
@@ -26,7 +30,7 @@ st.set_page_config(
 COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
 
 # ══════════════════════════════════════════════════════════════════════
-# ── SHARED HELPERS ────────────────────────────────────────────────────
+# SHARED HELPERS
 # ══════════════════════════════════════════════════════════════════════
 
 def calculate_returns(price_matrix):
@@ -35,165 +39,12 @@ def calculate_returns(price_matrix):
 def calculate_expected_returns(return_matrix):
     return np.mean(return_matrix, axis=0)
 
-# ══════════════════════════════════════════════════════════════════════
-# ── MODEL STRATEGIC ──────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════
-
-def strategic_portfolio_return(x, mu):
-    return np.sum(x * mu)
-
-def solve_strategic_portfolio(M_target, mu, cov_matrix):
-    n = len(mu)
-    def objective(x):
-        return x @ cov_matrix @ x
-    x0 = np.ones(n) / n
-    bounds = Bounds([0] * n, [1] * n)
-    constraints = [
-        LinearConstraint(np.ones(n), lb=[1.0], ub=[1.0]),
-        LinearConstraint(-mu, lb=-np.inf, ub=[-M_target]),
-    ]
-    result = minimize(objective, x0, method="SLSQP", bounds=bounds, constraints=constraints)
-    if result.success:
-        x_res = result.x
-        return x_res, result.fun, strategic_portfolio_return(x_res, mu), True
-    return None, None, None, False
-
-def parse_strategic_inputs(categories_str, returns_str, cov_str):
-    cats = [c.strip() for c in categories_str.split(",")]
-    rets = np.array([float(r.strip()) for r in returns_str.split(",")])
-    cov_lines = cov_str.strip().split("\n")
-    cov = np.array([[float(v.strip()) for v in line.split(",")] for line in cov_lines])
-    return cats, rets, cov
-
-@st.cache_data
-def compute_strategic_curve(rets_tuple, cov_tuple, n_points=40):
-    rets_arr = np.array(rets_tuple)
-    cov_arr  = np.array(cov_tuple)
-    M_levels = np.linspace(float(min(rets_arr)), float(max(rets_arr)), n_points)
-    alloc_list, feasible_M, risks_std = [], [], []
-    for M in M_levels:
-        x_l, rv_l, _, ok = solve_strategic_portfolio(M, rets_arr, cov_arr)
-        if ok:
-            alloc_list.append(x_l.tolist())
-            feasible_M.append(M)
-            risks_std.append(float(np.sqrt(rv_l)))
-    return feasible_M, risks_std, alloc_list
-
-# ══════════════════════════════════════════════════════════════════════
-# ── MODEL TACTICAL ───────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════
-
-def solve_tactical_portfolio(M_target, return_matrix):
-    expected_returns = calculate_expected_returns(return_matrix)
-    D = return_matrix - expected_returns
-    T = return_matrix.shape[0]
-    probs = np.ones(T) / T
-    def objective(x):
-        y = D @ x
-        return np.sum(probs * y ** 2)
-    n = len(expected_returns)
-    x0 = np.ones(n) / n
-    bounds = Bounds(np.zeros(n), np.ones(n))
-    constraints = [
-        LinearConstraint(np.ones((1, n)), [1], [1]),
-        LinearConstraint(expected_returns.reshape(1, -1), [M_target], [np.inf]),
-    ]
-    result = minimize(objective, x0, method="SLSQP", bounds=bounds, constraints=constraints)
-    if result.success:
-        return result.x, result.fun, np.sum(result.x * expected_returns), expected_returns, True
-    return None, None, None, expected_returns, False
-
 def parse_price_inputs(assets_str, prices_str):
     assets = [x.strip() for x in assets_str.split(",")]
     rows   = prices_str.strip().split("\n")
     prices = np.array([[float(v) for v in row.split(",")] for row in rows])
     return assets, prices
 
-@st.cache_data
-def compute_tactical_curve(prices_tuple, n_points=30):
-    prices_arr  = np.array(prices_tuple)
-    returns_arr = calculate_returns(prices_arr)
-    mu          = calculate_expected_returns(returns_arr)
-    M_levels    = np.linspace(0, float(max(mu)), n_points)
-    alloc_dict  = {i: [] for i in range(prices_arr.shape[1])}
-    risks, feasible_M = [], []
-    for M in M_levels:
-        x, r, _, _, ok = solve_tactical_portfolio(M, returns_arr)
-        if ok:
-            feasible_M.append(M)
-            risks.append(float(np.sqrt(r)))
-            for i in range(len(mu)):
-                alloc_dict[i].append(float(x[i]))
-    return feasible_M, risks, alloc_dict, mu.tolist()
-
-# ══════════════════════════════════════════════════════════════════════
-# ── MODEL DOWNSIDE VARIANCE ──────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════
-
-def solve_downside_portfolio(M_target, return_matrix):
-    mu = calculate_expected_returns(return_matrix)
-    T = return_matrix.shape[0]
-    n_assets = return_matrix.shape[1]
-    probabilities = np.ones(T) / T
-
-    def objective(z):
-        q = z[n_assets:]
-        return np.sum(probabilities * q ** 2)
-
-    x0 = np.ones(n_assets) / n_assets
-    q0 = np.ones(T) * 0.01
-    z0 = np.concatenate([x0, q0])
-    lb = np.concatenate([np.zeros(n_assets), np.zeros(T)])
-    ub = np.concatenate([np.ones(n_assets), np.ones(T) * 1e6])
-    bounds = Bounds(lb, ub)
-    constraints = []
-
-    # Sum x = 1
-    Aeq = np.zeros((1, n_assets + T))
-    Aeq[0, :n_assets] = 1
-    constraints.append(LinearConstraint(Aeq, [1], [1]))
-
-    # Expected return >= M
-    Aret = np.zeros((1, n_assets + T))
-    Aret[0, :n_assets] = mu
-    constraints.append(LinearConstraint(Aret, [M_target], [np.inf]))
-
-    # Scenario constraints: r_t @ x + q_t >= M
-    for t in range(T):
-        A = np.zeros(n_assets + T)
-        A[:n_assets] = return_matrix[t]
-        A[n_assets + t] = 1
-        constraints.append(LinearConstraint(A, [M_target], [np.inf]))
-
-    result = minimize(objective, z0, method="SLSQP", bounds=bounds, constraints=constraints)
-    if result.success:
-        x = result.x[:n_assets]
-        q = result.x[n_assets:]
-        risk = np.sum(probabilities * q ** 2)
-        ret  = np.sum(x * mu)
-        return x, risk, ret, mu, True
-    return None, None, None, mu, False
-
-@st.cache_data
-def compute_downside_curve(prices_tuple, n_points=25):
-    prices_arr  = np.array(prices_tuple)
-    returns_arr = calculate_returns(prices_arr)
-    mu          = calculate_expected_returns(returns_arr)
-    M_levels    = np.linspace(0, float(max(mu)), n_points)
-    alloc_dict  = {i: [] for i in range(prices_arr.shape[1])}
-    risks, feasible_M = [], []
-    for M in M_levels:
-        x, r, _, _, ok = solve_downside_portfolio(M, returns_arr)
-        if ok:
-            feasible_M.append(M)
-            risks.append(float(np.sqrt(r)))
-            for i in range(prices_arr.shape[1]):
-                alloc_dict[i].append(float(x[i]))
-    return feasible_M, risks, alloc_dict, mu.tolist()
-
-# ══════════════════════════════════════════════════════════════════════
-# DEFAULT DATA (shared Tactical & Downside)
-# ══════════════════════════════════════════════════════════════════════
 DEFAULT_ASSETS = "RD,AKZ,KLM,PHI,UN"
 DEFAULT_PRICES = """111.0,82.5,70.0,154.6,110.8
 108.1,81.6,73.7,152.4,108.0
@@ -248,12 +99,244 @@ DEFAULT_PRICES = """111.0,82.5,70.0,154.6,110.8
 93.6,92.7,80.5,164.0,139.3"""
 
 # ══════════════════════════════════════════════════════════════════════
+# MODEL STRATEGIC
+# ══════════════════════════════════════════════════════════════════════
+
+def strategic_portfolio_return(x, mu):
+    return np.sum(x * mu)
+
+def solve_strategic_portfolio(M_target, mu, cov_matrix):
+    n = len(mu)
+    def objective(x):
+        return x @ cov_matrix @ x
+    x0 = np.ones(n) / n
+    bounds = Bounds([0] * n, [1] * n)
+    constraints = [
+        LinearConstraint(np.ones(n), lb=[1.0], ub=[1.0]),
+        LinearConstraint(-mu, lb=-np.inf, ub=[-M_target]),
+    ]
+    result = minimize(objective, x0, method="SLSQP", bounds=bounds, constraints=constraints)
+    if result.success:
+        x_res = result.x
+        return x_res, result.fun, strategic_portfolio_return(x_res, mu), True
+    return None, None, None, False
+
+def parse_strategic_inputs(categories_str, returns_str, cov_str):
+    cats = [c.strip() for c in categories_str.split(",")]
+    rets = np.array([float(r.strip()) for r in returns_str.split(",")])
+    cov_lines = cov_str.strip().split("\n")
+    cov = np.array([[float(v.strip()) for v in line.split(",")] for line in cov_lines])
+    return cats, rets, cov
+
+@st.cache_data
+def compute_strategic_curve(rets_tuple, cov_tuple, n_points=40):
+    rets_arr = np.array(rets_tuple)
+    cov_arr  = np.array(cov_tuple)
+    M_levels = np.linspace(float(min(rets_arr)), float(max(rets_arr)), n_points)
+    alloc_list, feasible_M, risks_std = [], [], []
+    for M in M_levels:
+        x_l, rv_l, _, ok = solve_strategic_portfolio(M, rets_arr, cov_arr)
+        if ok:
+            alloc_list.append(x_l.tolist())
+            feasible_M.append(M)
+            risks_std.append(float(np.sqrt(rv_l)))
+    return feasible_M, risks_std, alloc_list
+
+# ══════════════════════════════════════════════════════════════════════
+# MODEL TACTICAL
+# ══════════════════════════════════════════════════════════════════════
+
+def solve_tactical_portfolio(M_target, return_matrix):
+    expected_returns = calculate_expected_returns(return_matrix)
+    D = return_matrix - expected_returns
+    T = return_matrix.shape[0]
+    probs = np.ones(T) / T
+    def objective(x):
+        y = D @ x
+        return np.sum(probs * y ** 2)
+    n = len(expected_returns)
+    x0 = np.ones(n) / n
+    bounds = Bounds(np.zeros(n), np.ones(n))
+    constraints = [
+        LinearConstraint(np.ones((1, n)), [1], [1]),
+        LinearConstraint(expected_returns.reshape(1, -1), [M_target], [np.inf]),
+    ]
+    result = minimize(objective, x0, method="SLSQP", bounds=bounds, constraints=constraints)
+    if result.success:
+        return result.x, result.fun, np.sum(result.x * expected_returns), expected_returns, True
+    return None, None, None, expected_returns, False
+
+@st.cache_data
+def compute_tactical_curve(prices_tuple, n_points=30):
+    prices_arr  = np.array(prices_tuple)
+    returns_arr = calculate_returns(prices_arr)
+    mu          = calculate_expected_returns(returns_arr)
+    M_levels    = np.linspace(0, float(max(mu)), n_points)
+    alloc_dict  = {i: [] for i in range(prices_arr.shape[1])}
+    risks, feasible_M = [], []
+    for M in M_levels:
+        x, r, _, _, ok = solve_tactical_portfolio(M, returns_arr)
+        if ok:
+            feasible_M.append(M)
+            risks.append(float(np.sqrt(r)))
+            for i in range(len(mu)):
+                alloc_dict[i].append(float(x[i]))
+    return feasible_M, risks, alloc_dict, mu.tolist()
+
+# ══════════════════════════════════════════════════════════════════════
+# MODEL DOWNSIDE VARIANCE
+# ══════════════════════════════════════════════════════════════════════
+
+def solve_downside_portfolio(M_target, return_matrix):
+    mu = calculate_expected_returns(return_matrix)
+    T = return_matrix.shape[0]
+    n_assets = return_matrix.shape[1]
+    probabilities = np.ones(T) / T
+    def objective(z):
+        q = z[n_assets:]
+        return np.sum(probabilities * q ** 2)
+    x0 = np.ones(n_assets) / n_assets
+    q0 = np.ones(T) * 0.01
+    z0 = np.concatenate([x0, q0])
+    lb = np.concatenate([np.zeros(n_assets), np.zeros(T)])
+    ub = np.concatenate([np.ones(n_assets), np.ones(T) * 1e6])
+    bounds = Bounds(lb, ub)
+    constraints = []
+    Aeq = np.zeros((1, n_assets + T)); Aeq[0, :n_assets] = 1
+    constraints.append(LinearConstraint(Aeq, [1], [1]))
+    Aret = np.zeros((1, n_assets + T)); Aret[0, :n_assets] = mu
+    constraints.append(LinearConstraint(Aret, [M_target], [np.inf]))
+    for t in range(T):
+        A = np.zeros(n_assets + T)
+        A[:n_assets] = return_matrix[t]
+        A[n_assets + t] = 1
+        constraints.append(LinearConstraint(A, [M_target], [np.inf]))
+    result = minimize(objective, z0, method="SLSQP", bounds=bounds, constraints=constraints)
+    if result.success:
+        x = result.x[:n_assets]
+        q = result.x[n_assets:]
+        risk = np.sum(probabilities * q ** 2)
+        ret  = np.sum(x * mu)
+        return x, risk, ret, mu, True
+    return None, None, None, mu, False
+
+@st.cache_data
+def compute_downside_curve(prices_tuple, n_points=25):
+    prices_arr  = np.array(prices_tuple)
+    returns_arr = calculate_returns(prices_arr)
+    mu          = calculate_expected_returns(returns_arr)
+    M_levels    = np.linspace(0, float(max(mu)), n_points)
+    alloc_dict  = {i: [] for i in range(prices_arr.shape[1])}
+    risks, feasible_M = [], []
+    for M in M_levels:
+        x, r, _, _, ok = solve_downside_portfolio(M, returns_arr)
+        if ok:
+            feasible_M.append(M)
+            risks.append(float(np.sqrt(r)))
+            for i in range(prices_arr.shape[1]):
+                alloc_dict[i].append(float(x[i]))
+    return feasible_M, risks, alloc_dict, mu.tolist()
+
+# ══════════════════════════════════════════════════════════════════════
+# MODEL PIECEWISE LINEAR (Exercise 18.3)
+# ══════════════════════════════════════════════════════════════════════
+
+def build_piecewise(qmax, segments):
+    breaks = np.linspace(0, qmax, segments + 1)
+    slopes, widths, errors = [], [], []
+    for i in range(segments):
+        qb, qe = breaks[i], breaks[i+1]
+        slopes.append(qb + qe)
+        widths.append(qe - qb)
+        errors.append(((qe - qb) ** 2) / 4)
+    return breaks, slopes, widths, errors
+
+def dynamic_segments(q_previous, epsilon):
+    seg = int(np.ceil(q_previous / (2 * np.sqrt(epsilon))))
+    return max(seg, 3)
+
+def solve_piecewise_portfolio(
+        return_matrix, asset_names,
+        target_return=0.20, min_fraction=0.05,
+        epsilon=0.10, segments=10, use_dynamic=True):
+
+    mu = calculate_expected_returns(return_matrix)
+    T, n = return_matrix.shape[0], len(asset_names)
+    probability = 1 / T
+    qmax = np.max(np.abs(return_matrix))
+
+    if use_dynamic:
+        segments = dynamic_segments(qmax, epsilon)
+
+    breaks, slopes, widths, errors = build_piecewise(qmax, segments)
+
+    model = LpProblem("Exercise18_3", LpMinimize)
+
+    x = {a: LpVariable(f"x_{a}", lowBound=0, upBound=1) for a in asset_names}
+    z = {a: LpVariable(f"z_{a}", cat="Binary") for a in asset_names}
+    trigger_RD = LpVariable("trigger_RD", cat="Binary")
+    q = {t: LpVariable(f"q_{t}", lowBound=0) for t in range(T)}
+    u = {(t, l): LpVariable(f"u_{t}_{l}", lowBound=0, upBound=widths[l])
+         for t in range(T) for l in range(segments)}
+
+    # Objective
+    model += lpSum(probability * slopes[l] * u[t, l]
+                   for t in range(T) for l in range(segments))
+
+    # Budget
+    model += lpSum(x[a] for a in asset_names) == 1
+
+    # Target return
+    model += lpSum(mu[i] * x[asset_names[i]] for i in range(n)) >= target_return
+
+    # Minimum investment (0 OR >= min_fraction)
+    for a in asset_names:
+        model += x[a] <= z[a]
+        model += x[a] >= min_fraction * z[a]
+
+    # Piecewise decomposition
+    for t in range(T):
+        model += q[t] == lpSum(u[t, l] for l in range(segments))
+
+    # Downside scenario constraints
+    for t in range(T):
+        model += (lpSum(return_matrix[t, i] * x[asset_names[i]] for i in range(n))
+                  + q[t] >= target_return)
+
+    # Logical constraint: IF RD > 20% THEN KLM < 30%
+    BIG_M = 1
+    model += x["RD"] - 0.20 <= BIG_M * trigger_RD
+    model += x["KLM"] <= 0.30 + BIG_M * (1 - trigger_RD)
+
+    model.solve(PULP_CBC_CMD(msg=False))
+
+    allocation = {a: value(x[a]) for a in asset_names}
+    selected   = {a: int(round(value(z[a]))) for a in asset_names}
+    expected_return = np.sum([allocation[asset_names[i]] * mu[i] for i in range(n)])
+
+    return {
+        "status":          LpStatus[model.status],
+        "allocation":      allocation,
+        "selected":        selected,
+        "expected_return": expected_return,
+        "risk":            value(model.objective),
+        "segments":        segments,
+        "epsilon":         epsilon,
+        "max_error":       max(errors),
+        "errors":          errors,
+        "breaks":          breaks,
+        "slopes":          slopes,
+        "qmax":            qmax,
+    }
+
+# ══════════════════════════════════════════════════════════════════════
 # SESSION STATE INIT
 # ══════════════════════════════════════════════════════════════════════
 for k, v in {
     "s_cats": None, "s_rets": None, "s_cov": None, "s_error": None,
     "t_assets": None, "t_prices": None, "t_error": None,
     "d_assets": None, "d_prices": None, "d_error": None,
+    "p_assets": None, "p_prices": None, "p_error": None,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -261,8 +344,8 @@ for k, v in {
 # ══════════════════════════════════════════════════════════════════════
 # HEADER UTAMA
 # ══════════════════════════════════════════════════════════════════════
-st.title("📈 Portfolio Optimization")
-st.markdown("**Mean-Variance & Downside Risk Optimization (SLSQP)** — AIMMS Chapter 18")
+st.title("📈 Portfolio Optimization Suite")
+st.markdown("**Mean-Variance, Downside Risk & Piecewise Linear Optimization (SLSQP / MILP)** — AIMMS Chapter 18")
 
 mode = st.radio(
     "Pilih Model Optimasi:",
@@ -270,15 +353,163 @@ mode = st.radio(
         "🏛️ Strategic Asset Allocation",
         "⚡ Tactical Asset Allocation",
         "📉 Downside Variance Optimization",
+        "🔢 Piecewise Linear (MILP)",
+        "📖 Panduan Penggunaan",
     ],
     horizontal=True,
 )
 st.divider()
 
+
+# ══════════════════════════════════════════════════════════════════════
+# ════════════════  PANDUAN PENGGUNAAN  ═══════════════════════════════
+# ══════════════════════════════════════════════════════════════════════
+if mode == "📖 Panduan Penggunaan":
+
+    st.header("📖 Panduan Penggunaan Aplikasi")
+    st.markdown("""
+Aplikasi ini mengimplementasikan **4 model optimasi portofolio** berdasarkan AIMMS Chapter 18.
+Pilih tab model di atas untuk mulai, atau baca panduan di bawah ini terlebih dahulu.
+    """)
+
+    with st.expander("🏛️ Strategic Asset Allocation", expanded=True):
+        st.markdown("""
+**Konsep:**
+Model Markowitz klasik — meminimalkan varians portofolio untuk target return tertentu
+menggunakan **matriks kovarians** yang sudah diketahui secara eksplisit.
+
+**Kapan digunakan:**
+Perencanaan jangka panjang (strategis) di mana ekspektasi return dan kovarians
+antar aset sudah diestimasi terlebih dahulu.
+
+**Input yang dibutuhkan (Sidebar):**
+| Input | Format | Contoh |
+|---|---|---|
+| Kategori Aset | Dipisahkan koma | `Stocks, Bonds, Real Estate` |
+| Ekspektasi Return | Angka desimal, koma | `10.8, 7.6, 9.5` |
+| Matriks Kovarians | Baris baru per baris matriks | `2.25, -0.12, 0.45` *(Enter)* `-0.12, 0.64, ...` |
+
+**Kontrol:**
+- **Slider Target Return (M):** geser untuk melihat bagaimana alokasi berubah
+- **Terapkan Data Baru:** klik setelah mengubah input di sidebar
+
+**Output:**
+- Metrik: Expected Return, Varians, Std Dev
+- Grafik alokasi aset vs target return
+- Kurva Risk-Reward (efficient frontier)
+- Tabel alokasi pada berbagai level M
+        """)
+
+    with st.expander("⚡ Tactical Asset Allocation"):
+        st.markdown("""
+**Konsep:**
+Meminimalkan **variance aktual** berdasarkan data harga historis.
+Kovarians dihitung langsung dari data return historis (tidak perlu input manual).
+
+**Kapan digunakan:**
+Penyesuaian portofolio jangka pendek/menengah berdasarkan pergerakan harga historis.
+
+**Input yang dibutuhkan (Sidebar):**
+| Input | Format | Contoh |
+|---|---|---|
+| Nama Aset | Dipisahkan koma | `RD, AKZ, KLM, PHI, UN` |
+| Data Harga Historis | Satu baris per periode, nilai koma | `111.0, 82.5, 70.0, ...` |
+
+**Kontrol:**
+- **Slider Target Return (M):** geser untuk eksplorasi efficient frontier
+- **Terapkan Data Baru:** klik setelah mengubah data harga
+
+**Output:**
+- Metrik: Expected Return aktual, Varians, Std Dev
+- Kurva Risk-Reward dari data historis
+- Portfolio Diversification chart
+- Tabel alokasi & 10 baris pertama return historis
+        """)
+
+    with st.expander("📉 Downside Variance Optimization"):
+        st.markdown("""
+**Konsep:**
+Meminimalkan **semi-variance** — hanya menghitung deviasi di **bawah** target return M.
+Berbeda dari variance biasa yang menghitung deviasi ke dua arah.
+
+**Kapan digunakan:**
+Investor yang lebih sensitif terhadap **kerugian** daripada potensi gain,
+atau saat distribusi return tidak simetris.
+
+**Perbedaan dengan Tactical:**
+- Tactical: meminimalkan `Σ p_t (r_t·x - μ·x)²` (total variance)
+- Downside: meminimalkan `Σ p_t q_t²` di mana `q_t = max(0, M - r_t·x)` (downside only)
+
+**Input yang dibutuhkan (Sidebar):**
+Sama dengan Tactical — nama aset dan data harga historis.
+
+**Catatan:**
+Proses komputasi lebih berat dari Tactical karena ada T constraint skenario tambahan.
+Wajar jika loading lebih lama.
+        """)
+
+    with st.expander("🔢 Piecewise Linear / MILP (Exercise 18.3)"):
+        st.markdown("""
+**Konsep:**
+Mengaproksimasi fungsi kuadratik `q²` dengan fungsi **piecewise linear**,
+kemudian diselesaikan sebagai **MILP** (Mixed Integer Linear Program) menggunakan CBC solver.
+
+**Fitur tambahan dibanding model lain:**
+- **Minimum investment:** setiap aset yang dipilih harus dialokasikan minimal X% (default 5%)
+- **Logical constraint:** jika alokasi RD > 20%, maka alokasi KLM harus < 30%
+- **Dynamic interval:** jumlah segmen piecewise dihitung otomatis berdasarkan ε
+
+**Input yang dibutuhkan (Sidebar):**
+| Parameter | Keterangan | Default |
+|---|---|---|
+| Target Return | Return minimum portofolio | 0.20 |
+| Minimum Investment | Batas bawah alokasi per aset (jika dipilih) | 0.05 (5%) |
+| Epsilon (ε) | Toleransi error aproksimasi | 0.10 |
+| Jumlah Interval | Segmen piecewise (jika non-dynamic) | 10 |
+| Dynamic Interval | Hitung otomatis segmen optimal | ✅ aktif |
+
+**Rumus Dynamic Interval:**
+$$K = \\left\\lceil \\frac{q_{max}}{2\\sqrt{\\varepsilon}} \\right\\rceil$$
+
+**Output:**
+- Status solver (Optimal/Infeasible)
+- Tabel alokasi + aset yang dipilih (binary)
+- Cek logical constraint RD-KLM
+- 4 grafik: alokasi, selected assets, error aproksimasi, piecewise vs quadratic
+        """)
+
+    with st.expander("💡 Tips Umum"):
+        st.markdown("""
+**Format Data Harga:**
+```
+111.0,82.5,70.0,154.6,110.8
+108.1,81.6,73.7,152.4,108.0
+...
+```
+- Setiap **baris** = satu periode waktu
+- Setiap **kolom** = satu aset
+- Urutan kolom harus sama dengan urutan nama aset
+- Minimal 2 baris data (untuk menghitung 1 return)
+
+**Masalah Umum:**
+| Masalah | Kemungkinan Penyebab |
+|---|---|
+| "Tidak ada solusi feasible" | Target return terlalu tinggi melebihi return maksimum semua aset |
+| Error membaca data | Ada spasi ekstra, baris kosong di tengah, atau koma ganda |
+| Hasil semua 0% | Terjadi degenerasi numerik — coba ubah target return sedikit |
+
+**Urutan eksplorasi yang disarankan:**
+1. Mulai dari **Strategic** untuk memahami konsep dasar
+2. Lanjut ke **Tactical** dengan data harga nyata
+3. Bandingkan dengan **Downside** untuk melihat perbedaan penanganan risiko
+4. Gunakan **Piecewise** untuk memahami aproksimasi MILP dan logical constraint
+        """)
+
+
 # ══════════════════════════════════════════════════════════════════════
 # ════════════════  STRATEGIC  ════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════
-if mode.startswith("🏛️"):
+elif mode.startswith("🏛️"):
 
     with st.sidebar:
         st.header("⚙️ Input — Strategic")
@@ -648,7 +879,7 @@ elif mode.startswith("⚡"):
 # ══════════════════════════════════════════════════════════════════════
 # ════════════════  DOWNSIDE VARIANCE  ════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════
-else:
+elif mode.startswith("📉"):
 
     with st.sidebar:
         st.header("⚙️ Input — Downside Variance")
@@ -663,11 +894,7 @@ else:
         st.divider()
         st.markdown("**Format:**\n- Aset: `RD,AKZ,KLM`\n- Harga: satu baris per periode, nilai koma")
         st.divider()
-        st.markdown(
-            "**ℹ️ Downside Variance:**\n\n"
-            "Meminimalkan **semi-variance** (hanya deviasi di bawah target), "
-            "bukan total variance. Lebih konservatif terhadap kerugian."
-        )
+        st.info("ℹ️ **Downside Variance** hanya meminimalkan deviasi di bawah target M, bukan total variance.")
 
     if apply_btn_d or st.session_state.d_assets is None:
         try:
@@ -690,8 +917,8 @@ else:
         st.error(st.session_state.d_error)
         st.stop()
 
-    assets_d = st.session_state.d_assets
-    prices_d = st.session_state.d_prices
+    assets_d  = st.session_state.d_assets
+    prices_d  = st.session_state.d_prices
     returns_d = calculate_returns(prices_d)
     mu_d      = calculate_expected_returns(returns_d)
 
@@ -699,8 +926,7 @@ else:
         "🎚️ Target Return (M)",
         min_value=0.0, max_value=float(max(mu_d)),
         value=round(float(max(mu_d)) * 0.4, 3),
-        step=0.01, format="%.2f",
-        key="d_slider",
+        step=0.01, format="%.2f", key="d_slider",
     )
     st.divider()
 
@@ -714,10 +940,10 @@ else:
 
     st.subheader(f"📊 Hasil Optimasi — Target M = {M_slider_d:.2f}")
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("🎯 Target Return (M)",         f"{M_slider_d:.4f}")
-    mc2.metric("📈 Expected Return Aktual",    f"{ret_d:.4f}")
-    mc3.metric("📉 Downside Risk (Semi-Var)",  f"{risk_d:.4f}")
-    mc4.metric("📊 Downside Std Dev",          f"{risk_std_d:.4f}")
+    mc1.metric("🎯 Target Return (M)",        f"{M_slider_d:.4f}")
+    mc2.metric("📈 Expected Return Aktual",   f"{ret_d:.4f}")
+    mc3.metric("📉 Downside Risk (Semi-Var)", f"{risk_d:.4f}")
+    mc4.metric("📊 Downside Std Dev",         f"{risk_std_d:.4f}")
     st.divider()
 
     with st.expander("📊 Expected Return & Alokasi Optimal per Aset"):
@@ -825,3 +1051,190 @@ else:
 
     st.divider()
     st.caption("Model: Downside Variance Optimization (SLSQP) | AIMMS Chapter 18")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ════════════════  PIECEWISE LINEAR (MILP)  ══════════════════════════
+# ══════════════════════════════════════════════════════════════════════
+else:  # Piecewise
+
+    with st.sidebar:
+        st.header("⚙️ Input — Piecewise Linear")
+        st.caption("Atur parameter MILP dan data harga.")
+        assets_input_p = st.text_input("Nama Aset (pisahkan koma)", value=DEFAULT_ASSETS, key="p_assets_input")
+        prices_input_p = st.text_area(
+            "Data Harga Historis",
+            value=DEFAULT_PRICES, height=220, key="p_prices_input",
+            help="Satu baris per periode; nilai dipisahkan koma",
+        )
+        apply_btn_p = st.button("✅ Terapkan Data Baru", use_container_width=True, type="primary", key="p_apply")
+        st.divider()
+        st.markdown("**Parameter Optimasi:**")
+        p_target   = st.slider("Target Return (M)",     0.00, 0.55, 0.20, 0.01, key="p_target")
+        p_minfrac  = st.slider("Min. Investment per Aset", 0.01, 0.20, 0.05, 0.01, key="p_minfrac",
+                                help="0 OR ≥ nilai ini (constraint binary)")
+        p_epsilon  = st.slider("Epsilon (ε)",           0.01, 1.00, 0.10, 0.01, key="p_epsilon",
+                                help="Toleransi error aproksimasi piecewise")
+        p_segments = st.slider("Jumlah Interval (manual)", 2, 50, 10, 1, key="p_segments",
+                                help="Hanya aktif jika Dynamic Interval dinonaktifkan")
+        p_dynamic  = st.checkbox("Dynamic Interval", value=True, key="p_dynamic",
+                                  help="Hitung K otomatis: ceil(q_max / 2√ε)")
+        st.divider()
+        st.markdown(
+            "**⚠️ Logical Constraint (hardcoded):**\n\n"
+            "Jika alokasi **RD > 20%**, maka alokasi **KLM < 30%**"
+        )
+
+    if apply_btn_p or st.session_state.p_assets is None:
+        try:
+            assets_p, prices_p = parse_price_inputs(assets_input_p, prices_input_p)
+            n_p = len(assets_p)
+            if prices_p.shape[1] != n_p:
+                st.session_state.p_error = f"❌ Kolom harga ({prices_p.shape[1]}) ≠ jumlah aset ({n_p})."
+            elif "RD" not in assets_p or "KLM" not in assets_p:
+                st.session_state.p_error = "❌ Nama aset harus mengandung 'RD' dan 'KLM' (logical constraint)."
+            elif prices_p.shape[0] < 2:
+                st.session_state.p_error = "❌ Data harga minimal 2 baris."
+            else:
+                st.session_state.p_assets = assets_p
+                st.session_state.p_prices = prices_p
+                st.session_state.p_error  = None
+                if apply_btn_p:
+                    st.toast("✅ Data berhasil diperbarui!", icon="✅")
+        except Exception as e:
+            st.session_state.p_error = f"❌ Kesalahan membaca data: {e}"
+
+    if st.session_state.p_error:
+        st.error(st.session_state.p_error)
+        st.stop()
+
+    assets_p  = st.session_state.p_assets
+    prices_p  = st.session_state.p_prices
+    returns_p = calculate_returns(prices_p)
+    st.divider()
+
+    with st.spinner("Menyelesaikan MILP... (mungkin 5–15 detik)"):
+        result_p = solve_piecewise_portfolio(
+            return_matrix=returns_p,
+            asset_names=assets_p,
+            target_return=p_target,
+            min_fraction=p_minfrac,
+            epsilon=p_epsilon,
+            segments=p_segments,
+            use_dynamic=p_dynamic,
+        )
+
+    # ── STATUS ──
+    status_color = "🟢" if result_p["status"] == "Optimal" else "🔴"
+    st.subheader(f"📊 Hasil Optimasi MILP — {status_color} {result_p['status']}")
+
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("🎯 Target Return (M)",    f"{p_target:.4f}")
+    mc2.metric("📈 Expected Return",      f"{result_p['expected_return']:.4f}")
+    mc3.metric("📉 Piecewise Risk",       f"{result_p['risk']:.4f}")
+    mc4.metric("🔢 Interval Digunakan",   f"{result_p['segments']}")
+    mc5.metric("⚠️ Max Approx Error",     f"{result_p['max_error']:.6f}")
+    st.divider()
+
+    # ── TABEL ALOKASI ──
+    col_tbl_p, col_pie_p = st.columns([3, 2], gap="large")
+
+    with col_tbl_p:
+        st.markdown("#### 📋 Tabel Alokasi & Aset Terpilih")
+        alloc_df = pd.DataFrame({
+            "Aset":           assets_p,
+            "Dipilih (0/1)":  [result_p["selected"][a] for a in assets_p],
+            "Alokasi (%)":    [f"{result_p['allocation'][a]*100:.2f}%" for a in assets_p],
+        })
+        st.dataframe(alloc_df, use_container_width=True, hide_index=True)
+
+        # Logical constraint check
+        rd_alloc  = result_p["allocation"].get("RD", 0) or 0
+        klm_alloc = result_p["allocation"].get("KLM", 0) or 0
+        st.markdown("#### ⚖️ Cek Logical Constraint (RD > 20% → KLM < 30%)")
+        if rd_alloc > 0.20:
+            if klm_alloc < 0.30:
+                st.success(f"✅ RD = {rd_alloc*100:.1f}% > 20% dan KLM = {klm_alloc*100:.1f}% < 30% — Constraint terpenuhi")
+            else:
+                st.error(f"❌ RD = {rd_alloc*100:.1f}% > 20% tetapi KLM = {klm_alloc*100:.1f}% ≥ 30% — Dilanggar!")
+        else:
+            st.info(f"ℹ️ RD = {rd_alloc*100:.1f}% ≤ 20% — Logical constraint tidak aktif")
+
+        st.markdown("#### 📋 Dynamic Interval Report")
+        st.markdown(
+            f"- ε = **{result_p['epsilon']}** | "
+            f"q_max = **{result_p['qmax']:.4f}** | "
+            f"K = **{result_p['segments']}** interval"
+        )
+
+    with col_pie_p:
+        st.markdown("#### 🥧 Komposisi Portofolio")
+        alloc_vals = [result_p["allocation"][a] or 0 for a in assets_p]
+        nonzero_labels = [assets_p[i] for i, v in enumerate(alloc_vals) if v > 0.001]
+        nonzero_vals   = [v for v in alloc_vals if v > 0.001]
+        if nonzero_vals:
+            fig_pie, ax_pie = plt.subplots(figsize=(5, 5))
+            ax_pie.pie(nonzero_vals, labels=nonzero_labels, autopct="%1.1f%%",
+                       colors=[COLORS[i % len(COLORS)] for i in range(len(nonzero_vals))],
+                       startangle=90)
+            ax_pie.set_title("Optimal Portfolio Allocation", fontsize=12, fontweight="bold")
+            fig_pie.tight_layout(); st.pyplot(fig_pie); plt.close(fig_pie)
+
+    st.divider()
+
+    # ── 3 GRAFIK BAWAH ──
+    col_sel, col_err, col_pw = st.columns(3, gap="medium")
+
+    with col_sel:
+        st.markdown("#### ✅ Selected Assets")
+        fig_sel, ax_sel = plt.subplots(figsize=(5, 4))
+        sel_vals = [result_p["selected"][a] for a in assets_p]
+        ax_sel.bar(assets_p, sel_vals,
+                   color=[COLORS[i % len(COLORS)] for i in range(len(assets_p))],
+                   edgecolor="white")
+        ax_sel.set_ylabel("Dipilih (0 / 1)", fontsize=10)
+        ax_sel.set_title("Selected Assets (Binary)", fontsize=11, fontweight="bold")
+        ax_sel.set_ylim(0, 1.4)
+        ax_sel.grid(axis="y", linestyle="--", alpha=0.4)
+        ax_sel.spines["top"].set_visible(False); ax_sel.spines["right"].set_visible(False)
+        fig_sel.tight_layout(); st.pyplot(fig_sel); plt.close(fig_sel)
+
+    with col_err:
+        st.markdown("#### 📐 Approximation Error per Interval")
+        fig_err, ax_err = plt.subplots(figsize=(5, 4))
+        ax_err.bar(range(len(result_p["errors"])), result_p["errors"],
+                   color="#9467bd", edgecolor="white")
+        ax_err.set_xlabel("Interval ke-", fontsize=10)
+        ax_err.set_ylabel("Max Error", fontsize=10)
+        ax_err.set_title("Piecewise Approximation Error", fontsize=11, fontweight="bold")
+        ax_err.grid(axis="y", linestyle="--", alpha=0.4)
+        ax_err.spines["top"].set_visible(False); ax_err.spines["right"].set_visible(False)
+        fig_err.tight_layout(); st.pyplot(fig_err); plt.close(fig_err)
+
+    with col_pw:
+        st.markdown("#### 📈 Piecewise vs Quadratic")
+        qmax_p  = result_p["qmax"]
+        x_arr   = np.linspace(0, qmax_p, 300)
+        breaks  = result_p["breaks"]
+        slopes  = result_p["slopes"]
+        pw_vals = []
+        for xx in x_arr:
+            vpw = 0
+            for i in range(len(slopes)):
+                left, right = breaks[i], breaks[i+1]
+                used = min(max(xx - left, 0), right - left)
+                vpw += slopes[i] * used
+            pw_vals.append(vpw)
+        fig_pw, ax_pw = plt.subplots(figsize=(5, 4))
+        ax_pw.plot(x_arr, x_arr**2,  linewidth=2.5, label="Quadratic q²", color="#1f77b4")
+        ax_pw.plot(x_arr, pw_vals, "--", linewidth=2.5, label="Piecewise", color="#d62728")
+        ax_pw.set_xlabel("q", fontsize=10)
+        ax_pw.set_ylabel("Risk", fontsize=10)
+        ax_pw.set_title("Piecewise Approximation", fontsize=11, fontweight="bold")
+        ax_pw.legend(fontsize=9)
+        ax_pw.grid(True, linestyle="--", alpha=0.4)
+        ax_pw.spines["top"].set_visible(False); ax_pw.spines["right"].set_visible(False)
+        fig_pw.tight_layout(); st.pyplot(fig_pw); plt.close(fig_pw)
+
+    st.divider()
+    st.caption("Model: Piecewise Linear MILP (CBC Solver / PuLP) | AIMMS Chapter 18 Exercise 18.3")
