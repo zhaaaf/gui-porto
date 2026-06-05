@@ -3,7 +3,7 @@ Portfolio Diversification – Strategic, Tactical, Downside Variance & Piecewise
 Gabungan empat model dalam satu aplikasi Streamlit
 
 Jalankan dengan:
-    python -m streamlit run app.py
+    python -m streamlit run main.py
 """
 
 import streamlit as st
@@ -17,6 +17,11 @@ from pulp import (
     LpProblem, LpMinimize, LpVariable, LpStatus,
     lpSum, value, PULP_CBC_CMD
 )
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
 
 # ══════════════════════════════════════════════════════════════════════
 # KONFIGURASI HALAMAN
@@ -97,6 +102,46 @@ DEFAULT_PRICES = """111.0,82.5,70.0,154.6,110.8
 102.8,103.1,81.8,164.2,141.2
 93.9,95.0,80.7,153.0,133.4
 93.6,92.7,80.5,164.0,139.3"""
+
+# ══════════════════════════════════════════════════════════════════════
+# YAHOO FINANCE HELPER
+# ══════════════════════════════════════════════════════════════════════
+
+PERIOD_OPTIONS = {
+    "6 bulan": "6mo",
+    "1 tahun": "1y",
+    "2 tahun": "2y",
+    "3 tahun": "3y",
+    "5 tahun": "5y",
+}
+
+@st.cache_data(show_spinner=False)
+def fetch_yfinance(tickers_str, period):
+    tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+    if not tickers:
+        return None, None, None, "Tidak ada ticker yang valid."
+    try:
+        raw = yf.download(tickers, period=period, auto_adjust=True, progress=False)
+        if raw.empty:
+            return None, None, None, "Data tidak ditemukan. Periksa kembali nama ticker."
+        # Support both single and multi-ticker
+        if len(tickers) == 1:
+            close = raw[["Close"]].copy()
+            close.columns = tickers
+        else:
+            close = raw["Close"].copy()
+        close = close.dropna()
+        if len(close) < 3:
+            return None, None, None, "Data terlalu sedikit (< 3 periode)."
+        rets = close.pct_change().dropna() * 100  # dalam %
+        # Drop tickers that have all NaN
+        rets = rets.dropna(axis=1, how="all")
+        available_tickers = list(rets.columns)
+        mu  = rets.mean().values
+        cov = rets.cov().values
+        return available_tickers, mu, cov, None
+    except Exception as e:
+        return None, None, None, f"Error mengambil data: {e}"
 
 # ══════════════════════════════════════════════════════════════════════
 # MODEL STRATEGIC
@@ -330,6 +375,65 @@ def solve_piecewise_portfolio(
     }
 
 # ══════════════════════════════════════════════════════════════════════
+# PIECEWISE LINEAR ILLUSTRATION CHART (like Figure 18.6)
+# ══════════════════════════════════════════════════════════════════════
+
+def plot_piecewise_illustration(breaks, slopes, qmax, n_breakpoints_show=None):
+    """Plot piecewise linear vs quadratic, matching Figure 18.6 style."""
+    x_arr = np.linspace(0, qmax, 400)
+
+    # Compute piecewise values
+    pw_vals = []
+    for xx in x_arr:
+        vpw = 0.0
+        for i in range(len(slopes)):
+            left, right = breaks[i], breaks[i + 1]
+            used = min(max(xx - left, 0.0), right - left)
+            vpw += slopes[i] * used
+        pw_vals.append(vpw)
+
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    ax.plot(x_arr, x_arr ** 2, color="black", linewidth=2.0, label="Kuadratik $q^2$")
+    ax.plot(x_arr, pw_vals, color="black", linewidth=1.5, linestyle="--",
+            label="Aproksimasi Piecewise Linear")
+
+    # Draw tick marks (I-bars) at interior breakpoints to show error
+    interior = breaks[1:-1]
+    if n_breakpoints_show is not None:
+        step = max(1, len(interior) // n_breakpoints_show)
+        interior = interior[::step][:n_breakpoints_show]
+
+    for bp in interior:
+        # Compute piecewise value at breakpoint
+        vpw_bp = 0.0
+        for i in range(len(slopes)):
+            left, right = breaks[i], breaks[i + 1]
+            used = min(max(bp - left, 0.0), right - left)
+            vpw_bp += slopes[i] * used
+        quad_bp = bp ** 2
+        mid_y = (vpw_bp + quad_bp) / 2.0
+        half_err = abs(vpw_bp - quad_bp) / 2.0
+        tick_width = qmax * 0.025
+        # Vertical bar
+        ax.plot([bp, bp], [mid_y - half_err, mid_y + half_err], color="black", linewidth=1.5)
+        # Top tick
+        ax.plot([bp - tick_width, bp + tick_width], [mid_y + half_err, mid_y + half_err],
+                color="black", linewidth=1.5)
+        # Bottom tick
+        ax.plot([bp - tick_width, bp + tick_width], [mid_y - half_err, mid_y - half_err],
+                color="black", linewidth=1.5)
+
+    ax.set_xlabel("q", fontsize=11)
+    ax.set_ylabel("Risiko", fontsize=11)
+    ax.set_title("Piecewise Linear vs Kuadratik", fontsize=12, fontweight="bold")
+    ax.legend(fontsize=9, loc="upper left")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+# ══════════════════════════════════════════════════════════════════════
 # SESSION STATE INIT
 # ══════════════════════════════════════════════════════════════════════
 for k, v in {
@@ -344,17 +448,17 @@ for k, v in {
 # ══════════════════════════════════════════════════════════════════════
 # HEADER UTAMA
 # ══════════════════════════════════════════════════════════════════════
-st.title("📈 Portfolio Optimization Suite")
+st.title("Portfolio Optimization Suite")
 st.markdown("**Mean-Variance, Downside Risk & Piecewise Linear Optimization (SLSQP / MILP)** — AIMMS Chapter 18")
 
 mode = st.radio(
     "Pilih Model Optimasi:",
     options=[
-        "🏛️ Strategic Asset Allocation",
-        "⚡ Tactical Asset Allocation",
-        "📉 Downside Variance Optimization",
-        "🔢 Piecewise Linear (MILP)",
-        "📖 Panduan Penggunaan",
+        "Strategic Asset Allocation",
+        "Tactical Asset Allocation",
+        "Downside Variance Optimization",
+        "Piecewise Linear (MILP)",
+        "Panduan Penggunaan",
     ],
     horizontal=True,
 )
@@ -362,45 +466,39 @@ st.divider()
 
 
 # ══════════════════════════════════════════════════════════════════════
-# ════════════════  PANDUAN PENGGUNAAN  ═══════════════════════════════
+# PANDUAN PENGGUNAAN
 # ══════════════════════════════════════════════════════════════════════
-if mode == "📖 Panduan Penggunaan":
+if mode == "Panduan Penggunaan":
 
-    st.header("📖 Panduan Penggunaan Aplikasi")
+    st.header("Panduan Penggunaan Aplikasi")
     st.markdown("""
 Aplikasi ini mengimplementasikan **4 model optimasi portofolio** berdasarkan AIMMS Chapter 18.
 Pilih tab model di atas untuk mulai, atau baca panduan di bawah ini terlebih dahulu.
     """)
 
-    with st.expander("🏛️ Strategic Asset Allocation", expanded=True):
+    with st.expander("Strategic Asset Allocation", expanded=True):
         st.markdown("""
 **Konsep:**
-Model Markowitz klasik — meminimalkan varians portofolio untuk target return tertentu
-menggunakan **matriks kovarians** yang sudah diketahui secara eksplisit.
+Model Markowitz klasik — meminimalkan varians portofolio untuk target return tertentu.
+Expected return dan matriks kovarians **diambil otomatis dari Yahoo Finance**.
 
 **Kapan digunakan:**
 Perencanaan jangka panjang (strategis) di mana ekspektasi return dan kovarians
-antar aset sudah diestimasi terlebih dahulu.
+antar aset diestimasi dari data historis pasar nyata.
 
 **Input yang dibutuhkan (Sidebar):**
 | Input | Format | Contoh |
 |---|---|---|
-| Kategori Aset | Dipisahkan koma | `Stocks, Bonds, Real Estate` |
-| Ekspektasi Return | Angka desimal, koma | `10.8, 7.6, 9.5` |
-| Matriks Kovarians | Baris baru per baris matriks | `2.25, -0.12, 0.45` *(Enter)* `-0.12, 0.64, ...` |
+| Ticker Saham | Dipisahkan koma, kode Yahoo Finance | `BBCA.JK, BMRI.JK, TLKM.JK` |
+| Periode Data | Pilih dari dropdown | `2 tahun` |
 
-**Kontrol:**
-- **Slider Target Return (M):** geser untuk melihat bagaimana alokasi berubah
-- **Terapkan Data Baru:** klik setelah mengubah input di sidebar
-
-**Output:**
-- Metrik: Expected Return, Varians, Std Dev
-- Grafik alokasi aset vs target return
-- Kurva Risk-Reward (efficient frontier)
-- Tabel alokasi pada berbagai level M
+**Catatan:**
+- Ticker Indonesia menggunakan suffix `.JK` (contoh: `BBCA.JK`)
+- Ticker US tidak perlu suffix (contoh: `AAPL, MSFT, GOOGL`)
+- Klik **Ambil Data** untuk memuat data dari Yahoo Finance
         """)
 
-    with st.expander("⚡ Tactical Asset Allocation"):
+    with st.expander("Tactical Asset Allocation"):
         st.markdown("""
 **Konsep:**
 Meminimalkan **variance aktual** berdasarkan data harga historis.
@@ -414,19 +512,9 @@ Penyesuaian portofolio jangka pendek/menengah berdasarkan pergerakan harga histo
 |---|---|---|
 | Nama Aset | Dipisahkan koma | `RD, AKZ, KLM, PHI, UN` |
 | Data Harga Historis | Satu baris per periode, nilai koma | `111.0, 82.5, 70.0, ...` |
-
-**Kontrol:**
-- **Slider Target Return (M):** geser untuk eksplorasi efficient frontier
-- **Terapkan Data Baru:** klik setelah mengubah data harga
-
-**Output:**
-- Metrik: Expected Return aktual, Varians, Std Dev
-- Kurva Risk-Reward dari data historis
-- Portfolio Diversification chart
-- Tabel alokasi & 10 baris pertama return historis
         """)
 
-    with st.expander("📉 Downside Variance Optimization"):
+    with st.expander("Downside Variance Optimization"):
         st.markdown("""
 **Konsep:**
 Meminimalkan **semi-variance** — hanya menghitung deviasi di **bawah** target return M.
@@ -439,48 +527,26 @@ atau saat distribusi return tidak simetris.
 **Perbedaan dengan Tactical:**
 - Tactical: meminimalkan `Σ p_t (r_t·x - μ·x)²` (total variance)
 - Downside: meminimalkan `Σ p_t q_t²` di mana `q_t = max(0, M - r_t·x)` (downside only)
-
-**Input yang dibutuhkan (Sidebar):**
-Sama dengan Tactical — nama aset dan data harga historis.
-
-**Catatan:**
-Proses komputasi lebih berat dari Tactical karena ada T constraint skenario tambahan.
-Wajar jika loading lebih lama.
         """)
 
-    with st.expander("🔢 Piecewise Linear / MILP (Exercise 18.3)"):
+    with st.expander("Piecewise Linear / MILP (Exercise 18.3)"):
         st.markdown("""
 **Konsep:**
 Mengaproksimasi fungsi kuadratik `q²` dengan fungsi **piecewise linear**,
 kemudian diselesaikan sebagai **MILP** (Mixed Integer Linear Program) menggunakan CBC solver.
 
-**Fitur tambahan dibanding model lain:**
-- **Minimum investment:** setiap aset yang dipilih harus dialokasikan minimal X% (default 5%)
+**Fitur tambahan:**
+- **Minimum investment:** setiap aset yang dipilih harus dialokasikan minimal X%
 - **Logical constraint:** jika alokasi RD > 20%, maka alokasi KLM harus < 30%
 - **Dynamic interval:** jumlah segmen piecewise dihitung otomatis berdasarkan ε
 
-**Input yang dibutuhkan (Sidebar):**
-| Parameter | Keterangan | Default |
-|---|---|---|
-| Target Return | Return minimum portofolio | 0.20 |
-| Minimum Investment | Batas bawah alokasi per aset (jika dipilih) | 0.05 (5%) |
-| Epsilon (ε) | Toleransi error aproksimasi | 0.10 |
-| Jumlah Interval | Segmen piecewise (jika non-dynamic) | 10 |
-| Dynamic Interval | Hitung otomatis segmen optimal | ✅ aktif |
-
 **Rumus Dynamic Interval:**
 $$K = \\left\\lceil \\frac{q_{max}}{2\\sqrt{\\varepsilon}} \\right\\rceil$$
-
-**Output:**
-- Status solver (Optimal/Infeasible)
-- Tabel alokasi + aset yang dipilih (binary)
-- Cek logical constraint RD-KLM
-- 4 grafik: alokasi, selected assets, error aproksimasi, piecewise vs quadratic
         """)
 
-    with st.expander("💡 Tips Umum"):
+    with st.expander("Tips Umum"):
         st.markdown("""
-**Format Data Harga:**
+**Format Data Harga (Tactical/Downside/Piecewise):**
 ```
 111.0,82.5,70.0,154.6,110.8
 108.1,81.6,73.7,152.4,108.0
@@ -489,93 +555,111 @@ $$K = \\left\\lceil \\frac{q_{max}}{2\\sqrt{\\varepsilon}} \\right\\rceil$$
 - Setiap **baris** = satu periode waktu
 - Setiap **kolom** = satu aset
 - Urutan kolom harus sama dengan urutan nama aset
-- Minimal 2 baris data (untuk menghitung 1 return)
 
 **Masalah Umum:**
 | Masalah | Kemungkinan Penyebab |
 |---|---|
-| "Tidak ada solusi feasible" | Target return terlalu tinggi melebihi return maksimum semua aset |
-| Error membaca data | Ada spasi ekstra, baris kosong di tengah, atau koma ganda |
-| Hasil semua 0% | Terjadi degenerasi numerik — coba ubah target return sedikit |
-
-**Urutan eksplorasi yang disarankan:**
-1. Mulai dari **Strategic** untuk memahami konsep dasar
-2. Lanjut ke **Tactical** dengan data harga nyata
-3. Bandingkan dengan **Downside** untuk melihat perbedaan penanganan risiko
-4. Gunakan **Piecewise** untuk memahami aproksimasi MILP dan logical constraint
+| "Tidak ada solusi feasible" | Target return terlalu tinggi |
+| Error membaca data | Spasi ekstra, baris kosong, atau koma ganda |
+| Hasil semua 0% | Degenerasi numerik — coba ubah target return |
         """)
 
 
 # ══════════════════════════════════════════════════════════════════════
-# ════════════════  STRATEGIC  ════════════════════════════════════════
+# STRATEGIC
 # ══════════════════════════════════════════════════════════════════════
-elif mode.startswith("🏛️"):
+elif mode.startswith("Strategic"):
 
     with st.sidebar:
-        st.header("⚙️ Input — Strategic")
-        st.caption("Ubah data lalu klik **Terapkan Data Baru**.")
-        categories_input = st.text_input(
-            "Kategori Aset (pisahkan koma)",
-            value="Stocks, Bonds, Real Estate",
-        )
-        returns_input = st.text_input(
-            "Ekspektasi Return (pisahkan koma)",
-            value="10.800, 7.600, 9.500",
-        )
-        cov_input = st.text_area(
-            "Matriks Kovarians (baris baru = baris matriks)",
-            value="2.250, -0.120, 0.450\n-0.120, 0.640, 0.336\n0.450, 0.336, 1.440",
-            height=130,
-            help="Setiap baris dipisahkan Enter, nilai dipisahkan koma",
-        )
-        apply_btn = st.button("✅ Terapkan Data Baru", use_container_width=True, type="primary")
+        st.header("Input — Strategic")
+
+        if not YFINANCE_AVAILABLE:
+            st.error("yfinance belum terinstall. Jalankan: `pip install yfinance`")
+        else:
+            st.caption("Masukkan ticker saham dan periode data.")
+            tickers_input = st.text_input(
+                "Ticker Saham (pisahkan koma)",
+                value="BBCA.JK, BBRI.JK, TLKM.JK",
+                help="Ticker Yahoo Finance. Indonesia: suffix .JK (BBCA.JK). US: AAPL, MSFT",
+            )
+            period_label = st.selectbox(
+                "Periode Data",
+                options=list(PERIOD_OPTIONS.keys()),
+                index=2,  # default 2 tahun
+            )
+            fetch_btn = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary")
+
         st.divider()
         st.markdown(
-            "**Format:**\n"
-            "- Kategori: `Stocks, Bonds, Gold`\n"
-            "- Return: `10.8, 7.6, 9.5`\n"
-            "- Kovarians: satu baris per baris matriks"
+            "**Contoh ticker:**\n"
+            "- Indonesia: `BBCA.JK, BMRI.JK, TLKM.JK`\n"
+            "- US: `AAPL, MSFT, GOOGL`\n"
+            "- Campuran: `BBCA.JK, AAPL`"
         )
 
-    if apply_btn or st.session_state.s_cats is None:
-        try:
-            cats, rets, cov = parse_strategic_inputs(categories_input, returns_input, cov_input)
-            n = len(cats)
-            if len(rets) != n:
-                st.session_state.s_error = f"❌ Jumlah kategori ({n}) ≠ jumlah return ({len(rets)})."
-            elif cov.shape != (n, n):
-                st.session_state.s_error = f"❌ Matriks kovarians harus {n}×{n}."
+    if not YFINANCE_AVAILABLE:
+        st.error("yfinance tidak tersedia. Install dengan: `pip install yfinance`")
+        st.stop()
+
+    if fetch_btn or st.session_state.s_cats is None:
+        if fetch_btn or st.session_state.s_cats is None:
+            period_code = PERIOD_OPTIONS[period_label]
+            with st.spinner(f"Mengambil data dari Yahoo Finance ({period_label})..."):
+                tickers_result, mu_yf, cov_yf, err = fetch_yfinance(tickers_input, period_code)
+            if err:
+                st.session_state.s_error = f"❌ {err}"
             else:
-                st.session_state.s_cats  = cats
-                st.session_state.s_rets  = rets
-                st.session_state.s_cov   = cov
+                st.session_state.s_cats  = tickers_result
+                st.session_state.s_rets  = mu_yf
+                st.session_state.s_cov   = cov_yf
                 st.session_state.s_error = None
-                if apply_btn:
-                    st.toast("✅ Data berhasil diperbarui!", icon="✅")
-        except Exception as e:
-            st.session_state.s_error = f"❌ Kesalahan membaca data: {e}"
+                if fetch_btn:
+                    st.toast(f"Data berhasil diambil: {', '.join(tickers_result)}", icon="✅")
 
     if st.session_state.s_error:
         st.error(st.session_state.s_error)
+        st.info("Pastikan nama ticker benar dan koneksi internet tersedia.")
+        st.stop()
+
+    if st.session_state.s_cats is None:
+        st.info("Klik **Ambil Data dari Yahoo Finance** di sidebar untuk memulai.")
         st.stop()
 
     cats = st.session_state.s_cats
     rets = st.session_state.s_rets
     cov  = st.session_state.s_cov
 
+    # Info data yang digunakan
+    with st.expander("Data yang digunakan", expanded=False):
+        col_ret, col_cov = st.columns(2)
+        with col_ret:
+            st.markdown("**Expected Return per periode (%):**")
+            df_ret_info = pd.DataFrame({
+                "Saham": cats,
+                "Expected Return (% per periode)": [f"{r:.4f}%" for r in rets],
+            })
+            st.dataframe(df_ret_info, use_container_width=True, hide_index=True)
+        with col_cov:
+            st.markdown("**Matriks Kovarians:**")
+            st.dataframe(
+                pd.DataFrame(cov, columns=cats, index=cats).applymap(lambda x: f"{x:.4f}"),
+                use_container_width=True,
+            )
+
     M_min_val = float(min(rets))
     M_max_val = float(max(rets))
     M_target  = st.slider(
-        "🎚️ Target Return (M)",
+        "Target Return (M)",
         min_value=M_min_val, max_value=M_max_val,
-        value=round((M_min_val + M_max_val) / 2, 1),
-        step=0.1, format="%.1f",
+        value=round((M_min_val + M_max_val) / 2, 4),
+        step=round((M_max_val - M_min_val) / 100, 5),
+        format="%.4f",
     )
     st.divider()
 
     x_opt, risk_opt_var, return_opt, success = solve_strategic_portfolio(M_target, rets, cov)
     if not success:
-        st.warning(f"⚠️ Tidak ditemukan solusi feasible untuk M = {M_target:.1f}.")
+        st.warning(f"Tidak ditemukan solusi feasible untuk M = {M_target:.4f}%.")
         st.stop()
     risk_opt_std = np.sqrt(risk_opt_var)
 
@@ -583,26 +667,25 @@ elif mode.startswith("🏛️"):
         tuple(rets.tolist()), tuple(map(tuple, cov.tolist()))
     )
 
-    M_specific_raw = np.arange(np.ceil(M_min_val * 10) / 10, M_max_val + 0.1, 1.0)
-    M_specific     = np.round(M_specific_raw, 1)
-    M_specific     = M_specific[(M_specific >= M_min_val) & (M_specific <= M_max_val)]
+    M_specific_raw = np.linspace(M_min_val, M_max_val, 6)
+    M_specific     = np.round(M_specific_raw, 4)
     specific_risks = []
     for M_s in M_specific:
         _, rv_s, _, ok_s = solve_strategic_portfolio(float(M_s), rets, cov)
         specific_risks.append(float(np.sqrt(rv_s)) if ok_s else None)
 
-    st.subheader(f"📊 Hasil Optimasi — Target M = {M_target:.1f}")
+    st.subheader(f"Hasil Optimasi — Target M = {M_target:.4f}%")
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("🎯 Target Return (M)",      f"{M_target:.1f}")
-    mc2.metric("📈 Expected Return Aktual", f"{return_opt:.4f}")
-    mc3.metric("📉 Risiko (Varians)",       f"{risk_opt_var:.4f}")
-    mc4.metric("📊 Standar Deviasi",        f"{risk_opt_std:.4f}")
+    mc1.metric("Target Return (M)",      f"{M_target:.4f}%")
+    mc2.metric("Expected Return Aktual", f"{return_opt:.4f}%")
+    mc3.metric("Risiko (Varians)",       f"{risk_opt_var:.4f}")
+    mc4.metric("Standar Deviasi",        f"{risk_opt_std:.4f}%")
     st.divider()
 
     col_g1, col_g2 = st.columns(2, gap="medium")
 
     with col_g1:
-        st.markdown("#### 📉 Asset Allocation vs Expected Return")
+        st.markdown("#### Asset Allocation vs Expected Return")
         fig1, ax1 = plt.subplots(figsize=(7, 5))
         alloc_arr = np.array(alloc_curve)
         for i, cat in enumerate(cats):
@@ -610,19 +693,19 @@ elif mode.startswith("🏛️"):
                      marker="o", linewidth=2.5, markersize=4,
                      label=cat, color=COLORS[i % len(COLORS)])
         ax1.axvline(M_target, color="red", linestyle="--", alpha=0.75,
-                    linewidth=2, label=f"Target Return: {M_target}")
-        ax1.set_xlabel("Minimal level of expected return", fontsize=11, fontweight="bold")
-        ax1.set_ylabel("Budget fractions",                 fontsize=11, fontweight="bold")
+                    linewidth=2, label=f"Target Return: {M_target:.4f}%")
+        ax1.set_xlabel("Minimal level of expected return (%)", fontsize=11, fontweight="bold")
+        ax1.set_ylabel("Budget fractions",                     fontsize=11, fontweight="bold")
         ax1.set_title("Asset Allocation vs Expected Return", fontsize=13, fontweight="bold")
         ax1.legend(loc="center right", fontsize=9)
         ax1.grid(True, linestyle="--", alpha=0.3)
-        ax1.set_xlim(M_min_val - 0.2, M_max_val + 0.2)
+        ax1.set_xlim(M_min_val - abs(M_min_val)*0.05, M_max_val + abs(M_max_val)*0.05)
         ax1.set_ylim(-0.05, 1.05)
         ax1.spines["top"].set_visible(False); ax1.spines["right"].set_visible(False)
         fig1.tight_layout(); st.pyplot(fig1); plt.close(fig1)
 
     with col_g2:
-        st.markdown("#### 📈 Figure 18.2: Risk-Reward Characteristic")
+        st.markdown("#### Risk-Reward Characteristic")
         fig2, ax2 = plt.subplots(figsize=(7, 5))
         ax2.plot(feasible_M_levels, risks_std_curve, "b-", linewidth=2.5,
                  label="Risk-Reward Characteristic")
@@ -632,19 +715,17 @@ elif mode.startswith("🏛️"):
             if specific_risks[idx] is not None:
                 ax2.plot(M_val, specific_risks[idx], "ro", markersize=10,
                          markeredgecolor="darkred", markeredgewidth=1.5)
-                ax2.annotate(f"{specific_risks[idx]:.3f}", xy=(M_val, specific_risks[idx]),
+                ax2.annotate(f"{specific_risks[idx]:.3f}%", xy=(M_val, specific_risks[idx]),
                              xytext=(8, 5), textcoords="offset points",
                              fontsize=9, fontweight="bold", color="darkred")
         ax2.plot(M_target, risk_opt_std, "g*", markersize=18,
                  markeredgecolor="darkgreen", markeredgewidth=1.5,
-                 label=f"Selected Portfolio (M = {M_target})", zorder=5)
-        ax2.set_xlabel("Minimal level of expected return", fontsize=11, fontweight="bold")
-        ax2.set_ylabel("Portfolio risk (Std Dev)",          fontsize=11, fontweight="bold")
-        ax2.set_title("Figure 18.2: Risk-Reward Characteristic", fontsize=13, fontweight="bold")
+                 label=f"Selected Portfolio (M = {M_target:.4f}%)", zorder=5)
+        ax2.set_xlabel("Minimal level of expected return (%)", fontsize=11, fontweight="bold")
+        ax2.set_ylabel("Portfolio risk — Std Dev (%)",         fontsize=11, fontweight="bold")
+        ax2.set_title("Risk-Reward Characteristic", fontsize=13, fontweight="bold")
         ax2.legend(loc="upper left", fontsize=9)
         ax2.grid(True, linestyle="--", alpha=0.4)
-        ax2.set_xlim(M_min_val - 0.3, M_max_val + 0.3)
-        ax2.set_ylim(y_fill_min, max(risks_std_curve) * 1.1)
         ax2.spines["top"].set_visible(False); ax2.spines["right"].set_visible(False)
         fig2.tight_layout(); st.pyplot(fig2); plt.close(fig2)
 
@@ -653,29 +734,29 @@ elif mode.startswith("🏛️"):
     col_tbl, col_rec = st.columns([3, 2], gap="large")
 
     with col_tbl:
-        st.markdown("#### 📋 Tabel Alokasi pada Berbagai Target Return")
+        st.markdown("#### Tabel Alokasi pada Berbagai Target Return")
         key_returns = sorted(set(np.round(
-            [M_min_val, (M_min_val + M_max_val) / 2, M_max_val, M_target], 1
+            [M_min_val, (M_min_val + M_max_val) / 2, M_max_val, M_target], 4
         ).tolist()))
         tbl_rows = []
         for M_k in key_returns:
             x_k, rv_k, ret_k, ok_k = solve_strategic_portfolio(float(M_k), rets, cov)
             if ok_k:
-                row = {"Target Return": f"{M_k:.1f}"}
+                row = {"Target Return (%)": f"{M_k:.4f}%"}
                 for i, cat in enumerate(cats):
                     row[cat] = f"{x_k[i]*100:.1f}%"
-                row["Risk (Std)"]  = f"{np.sqrt(rv_k):.4f}"
-                row["Exp. Return"] = f"{ret_k:.4f}"
+                row["Risk (Std Dev %)"] = f"{np.sqrt(rv_k):.4f}%"
+                row["Exp. Return (%)"]  = f"{ret_k:.4f}%"
                 tbl_rows.append(row)
         st.dataframe(tbl_rows, use_container_width=True, hide_index=True)
         st.info(
-            f"📌 **M = {M_target:.1f}** → "
+            f"M = {M_target:.4f}% → "
             + " | ".join([f"{cats[i]}: **{x_opt[i]*100:.1f}%**" for i in range(len(cats))])
-            + f" | Risk: **{risk_opt_std:.4f}**"
+            + f" | Std Dev: **{risk_opt_std:.4f}%**"
         )
 
     with col_rec:
-        st.markdown(f"#### 💡 Rekomendasi untuk M = {M_target:.1f}")
+        st.markdown(f"#### Rekomendasi untuk M = {M_target:.4f}%")
         fig_bar, ax_bar = plt.subplots(figsize=(5, max(3, len(cats) * 1.1)))
         bars = ax_bar.barh(cats, x_opt * 100,
                            color=[COLORS[i % len(COLORS)] for i in range(len(cats))],
@@ -686,17 +767,17 @@ elif mode.startswith("🏛️"):
                         f"{val:.1f}%", va="center", fontsize=10, fontweight="bold")
         ax_bar.set_xlim(0, 115)
         ax_bar.set_xlabel("Alokasi (%)", fontsize=10)
-        ax_bar.set_title(f"Komposisi Portofolio (M = {M_target:.1f})", fontsize=11, fontweight="bold")
+        ax_bar.set_title(f"Komposisi Portofolio (M = {M_target:.4f}%)", fontsize=11, fontweight="bold")
         ax_bar.grid(axis="x", linestyle="--", alpha=0.4)
         ax_bar.spines["top"].set_visible(False); ax_bar.spines["right"].set_visible(False)
         fig_bar.tight_layout(); st.pyplot(fig_bar); plt.close(fig_bar)
 
-        st.markdown("**📊 Analisis Risk-Reward:**")
+        st.markdown("**Analisis Risk-Reward:**")
         r_low, r_high = min(risks_std_curve), max(risks_std_curve)
         delta_pct = (r_high - r_low) / r_low * 100
         st.markdown(
-            f"- Return terendah ({M_min_val:.1f}) → risiko = **{r_low:.4f}**\n"
-            f"- Return tertinggi ({M_max_val:.1f}) → risiko = **{r_high:.4f}**\n"
+            f"- Return terendah ({M_min_val:.4f}%) → risiko = **{r_low:.4f}%**\n"
+            f"- Return tertinggi ({M_max_val:.4f}%) → risiko = **{r_high:.4f}%**\n"
             f"- Risk naik sebesar **{delta_pct:.1f}%** dari min ke max return"
         )
 
@@ -705,12 +786,12 @@ elif mode.startswith("🏛️"):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# ════════════════  TACTICAL  ═════════════════════════════════════════
+# TACTICAL
 # ══════════════════════════════════════════════════════════════════════
-elif mode.startswith("⚡"):
+elif mode.startswith("Tactical"):
 
     with st.sidebar:
-        st.header("⚙️ Input — Tactical")
+        st.header("Input — Tactical")
         st.caption("Masukkan nama aset dan data harga historis.")
         assets_input = st.text_input("Nama Aset (pisahkan koma)", value=DEFAULT_ASSETS)
         prices_input = st.text_area(
@@ -718,7 +799,7 @@ elif mode.startswith("⚡"):
             value=DEFAULT_PRICES, height=320,
             help="Setiap baris adalah satu periode; nilai dipisahkan koma",
         )
-        apply_btn_t = st.button("✅ Terapkan Data Baru", use_container_width=True, type="primary")
+        apply_btn_t = st.button("Terapkan Data Baru", use_container_width=True, type="primary")
         st.divider()
         st.markdown("**Format:**\n- Aset: `RD,AKZ,KLM`\n- Harga: satu baris per periode, nilai koma")
 
@@ -735,7 +816,7 @@ elif mode.startswith("⚡"):
                 st.session_state.t_prices = prices
                 st.session_state.t_error  = None
                 if apply_btn_t:
-                    st.toast("✅ Data berhasil diperbarui!", icon="✅")
+                    st.toast("Data berhasil diperbarui!", icon="✅")
         except Exception as e:
             st.session_state.t_error = f"❌ Kesalahan membaca data: {e}"
 
@@ -749,31 +830,31 @@ elif mode.startswith("⚡"):
     mu      = calculate_expected_returns(returns)
 
     M_slider = st.slider(
-        "🎚️ Target Return (M)",
+        "Target Return (M)",
         min_value=0.0, max_value=float(max(mu)),
         value=round(float(max(mu)) * 0.4, 3),
-        step=0.01, format="%.2f",
+        step=0.01, format="%.2f%%",
     )
     st.divider()
 
     x_opt_t, risk_t, ret_t, mu_t, success_t = solve_tactical_portfolio(M_slider, returns)
     if not success_t:
-        st.warning(f"⚠️ Tidak ditemukan solusi feasible untuk M = {M_slider:.2f}.")
+        st.warning(f"Tidak ditemukan solusi feasible untuk M = {M_slider:.2f}%.")
         st.stop()
     risk_std_t = np.sqrt(risk_t)
 
-    st.subheader(f"📊 Hasil Optimasi — Target M = {M_slider:.2f}")
+    st.subheader(f"Hasil Optimasi — Target M = {M_slider:.2f}%")
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("🎯 Target Return (M)",      f"{M_slider:.4f}")
-    mc2.metric("📈 Expected Return Aktual", f"{ret_t:.4f}")
-    mc3.metric("📉 Risiko (Varians)",       f"{risk_t:.4f}")
-    mc4.metric("📊 Standar Deviasi",        f"{risk_std_t:.4f}")
+    mc1.metric("Target Return (M)",      f"{M_slider:.4f}%")
+    mc2.metric("Expected Return Aktual", f"{ret_t:.4f}%")
+    mc3.metric("Risiko (Varians)",       f"{risk_t:.4f}")
+    mc4.metric("Standar Deviasi",        f"{risk_std_t:.4f}%")
     st.divider()
 
-    with st.expander("📊 Expected Return & Alokasi Optimal per Aset"):
+    with st.expander("Expected Return & Alokasi Optimal per Aset"):
         df_mu = pd.DataFrame({
             "Aset":            assets,
-            "Expected Return": [f"{v:.4f}" for v in mu_t],
+            "Expected Return": [f"{v:.4f}%" for v in mu_t],
             "Alokasi Optimal": [f"{x_opt_t[i]*100:.2f}%" for i in range(len(assets))],
         })
         st.dataframe(df_mu, use_container_width=True, hide_index=True)
@@ -785,34 +866,34 @@ elif mode.startswith("⚡"):
     col_g1t, col_g2t = st.columns(2, gap="medium")
 
     with col_g1t:
-        st.markdown("#### 📈 Figure 18.4: Risk-Reward Characteristic")
+        st.markdown("#### Risk-Reward Characteristic")
         fig4, ax4 = plt.subplots(figsize=(7, 5))
         ax4.plot(feasible_M_t, risks_std_t, linewidth=2.5, marker="o",
                  color="#1f77b4", label="Risk-Reward Characteristic")
         y_fill_min_t = max(0.0, min(risks_std_t) * 0.8)
         ax4.fill_between(feasible_M_t, risks_std_t, y_fill_min_t, alpha=0.1, color="#1f77b4")
         ax4.scatter(M_slider, risk_std_t, s=200, marker="*", color="green",
-                    edgecolors="darkgreen", zorder=5, label=f"Selected (M={M_slider:.2f})")
-        ax4.set_xlabel("Minimal Expected Return", fontsize=11, fontweight="bold")
-        ax4.set_ylabel("Portfolio Risk (Std Dev)", fontsize=11, fontweight="bold")
-        ax4.set_title("Figure 18.4: Risk-Reward Characteristic", fontsize=13, fontweight="bold")
+                    edgecolors="darkgreen", zorder=5, label=f"Selected (M={M_slider:.2f}%)")
+        ax4.set_xlabel("Minimal Expected Return (%)", fontsize=11, fontweight="bold")
+        ax4.set_ylabel("Portfolio Risk — Std Dev (%)", fontsize=11, fontweight="bold")
+        ax4.set_title("Risk-Reward Characteristic", fontsize=13, fontweight="bold")
         ax4.legend(loc="upper left", fontsize=9)
         ax4.grid(True, linestyle="--", alpha=0.4)
         ax4.spines["top"].set_visible(False); ax4.spines["right"].set_visible(False)
         fig4.tight_layout(); st.pyplot(fig4); plt.close(fig4)
 
     with col_g2t:
-        st.markdown("#### 📉 Figure 18.5: Portfolio Diversification")
+        st.markdown("#### Portfolio Diversification")
         fig5, ax5 = plt.subplots(figsize=(7, 5))
         for i, a in enumerate(assets):
             ax5.plot(feasible_M_t, alloc_dict_t[i],
                      linewidth=2.5, marker="o", markersize=4,
                      label=a, color=COLORS[i % len(COLORS)])
         ax5.axvline(M_slider, color="red", linestyle="--", alpha=0.75,
-                    linewidth=2, label=f"Target Return: {M_slider:.2f}")
-        ax5.set_xlabel("Minimal Expected Return", fontsize=11, fontweight="bold")
-        ax5.set_ylabel("Budget Fraction",          fontsize=11, fontweight="bold")
-        ax5.set_title("Figure 18.5: Portfolio Diversification", fontsize=13, fontweight="bold")
+                    linewidth=2, label=f"Target Return: {M_slider:.2f}%")
+        ax5.set_xlabel("Minimal Expected Return (%)", fontsize=11, fontweight="bold")
+        ax5.set_ylabel("Budget Fraction",              fontsize=11, fontweight="bold")
+        ax5.set_title("Portfolio Diversification", fontsize=13, fontweight="bold")
         ax5.legend(loc="center right", fontsize=9)
         ax5.grid(True, linestyle="--", alpha=0.3)
         ax5.set_ylim(-0.05, 1.05)
@@ -824,28 +905,28 @@ elif mode.startswith("⚡"):
     col_tbl_t, col_rec_t = st.columns([3, 2], gap="large")
 
     with col_tbl_t:
-        st.markdown("#### 📋 Tabel Alokasi Berbagai Target Return")
+        st.markdown("#### Tabel Alokasi Berbagai Target Return")
         sample_M_t = np.linspace(0, float(max(mu_t)), 5)
         tbl_rows_t = []
         for M_k in sample_M_t:
             x_k, r_k, rr_k, _, ok_k = solve_tactical_portfolio(float(M_k), returns)
             if ok_k:
-                row = {"Target Return": f"{M_k:.4f}", "Risk (Var)": f"{r_k:.4f}"}
+                row = {"Target Return (%)": f"{M_k:.4f}%", "Risk (Var)": f"{r_k:.4f}"}
                 for i, a in enumerate(assets):
                     row[a] = f"{x_k[i]*100:.1f}%"
                 tbl_rows_t.append(row)
         st.dataframe(tbl_rows_t, use_container_width=True, hide_index=True)
         st.info(
-            f"📌 **M = {M_slider:.2f}** → "
+            f"M = {M_slider:.2f}% → "
             + " | ".join([f"{assets[i]}: **{x_opt_t[i]*100:.1f}%**" for i in range(len(assets))])
-            + f" | Risk: **{risk_std_t:.4f}**"
+            + f" | Std Dev: **{risk_std_t:.4f}%**"
         )
-        st.markdown("#### 📋 Scenario Returns (10 Baris Pertama)")
+        st.markdown("#### Scenario Returns (10 Baris Pertama)")
         df_ret = pd.DataFrame(returns, columns=assets)
-        st.dataframe(df_ret.head(10), use_container_width=True)
+        st.dataframe(df_ret.head(10).applymap(lambda x: f"{x:.4f}%"), use_container_width=True)
 
     with col_rec_t:
-        st.markdown(f"#### 💡 Rekomendasi untuk M = {M_slider:.2f}")
+        st.markdown(f"#### Rekomendasi untuk M = {M_slider:.2f}%")
         fig_bar_t, ax_bar_t = plt.subplots(figsize=(5, max(3, len(assets) * 1.0)))
         bars_t = ax_bar_t.barh(
             assets, x_opt_t * 100,
@@ -858,17 +939,17 @@ elif mode.startswith("⚡"):
                           f"{val:.1f}%", va="center", fontsize=10, fontweight="bold")
         ax_bar_t.set_xlim(0, 115)
         ax_bar_t.set_xlabel("Alokasi (%)", fontsize=10)
-        ax_bar_t.set_title(f"Komposisi Portofolio (M = {M_slider:.2f})", fontsize=11, fontweight="bold")
+        ax_bar_t.set_title(f"Komposisi Portofolio (M = {M_slider:.2f}%)", fontsize=11, fontweight="bold")
         ax_bar_t.grid(axis="x", linestyle="--", alpha=0.4)
         ax_bar_t.spines["top"].set_visible(False); ax_bar_t.spines["right"].set_visible(False)
         fig_bar_t.tight_layout(); st.pyplot(fig_bar_t); plt.close(fig_bar_t)
 
-        st.markdown("**📊 Analisis Risk-Reward:**")
+        st.markdown("**Analisis Risk-Reward:**")
         r_low_t, r_high_t = min(risks_std_t), max(risks_std_t)
         delta_pct_t = (r_high_t - r_low_t) / r_low_t * 100
         st.markdown(
-            f"- Return terendah (0.00) → risiko = **{r_low_t:.4f}**\n"
-            f"- Return tertinggi ({max(mu_t):.2f}) → risiko = **{r_high_t:.4f}**\n"
+            f"- Return terendah (0.00%) → risiko = **{r_low_t:.4f}%**\n"
+            f"- Return tertinggi ({max(mu_t):.2f}%) → risiko = **{r_high_t:.4f}%**\n"
             f"- Risk naik sebesar **{delta_pct_t:.1f}%** dari min ke max return"
         )
 
@@ -877,12 +958,12 @@ elif mode.startswith("⚡"):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# ════════════════  DOWNSIDE VARIANCE  ════════════════════════════════
+# DOWNSIDE VARIANCE
 # ══════════════════════════════════════════════════════════════════════
-elif mode.startswith("📉"):
+elif mode.startswith("Downside"):
 
     with st.sidebar:
-        st.header("⚙️ Input — Downside Variance")
+        st.header("Input — Downside Variance")
         st.caption("Masukkan nama aset dan data harga historis.")
         assets_input_d = st.text_input("Nama Aset (pisahkan koma)", value=DEFAULT_ASSETS, key="d_assets_input")
         prices_input_d = st.text_area(
@@ -890,11 +971,11 @@ elif mode.startswith("📉"):
             value=DEFAULT_PRICES, height=320, key="d_prices_input",
             help="Setiap baris adalah satu periode; nilai dipisahkan koma",
         )
-        apply_btn_d = st.button("✅ Terapkan Data Baru", use_container_width=True, type="primary", key="d_apply")
+        apply_btn_d = st.button("Terapkan Data Baru", use_container_width=True, type="primary", key="d_apply")
         st.divider()
         st.markdown("**Format:**\n- Aset: `RD,AKZ,KLM`\n- Harga: satu baris per periode, nilai koma")
         st.divider()
-        st.info("ℹ️ **Downside Variance** hanya meminimalkan deviasi di bawah target M, bukan total variance.")
+        st.info("**Downside Variance** hanya meminimalkan deviasi di bawah target M, bukan total variance.")
 
     if apply_btn_d or st.session_state.d_assets is None:
         try:
@@ -909,7 +990,7 @@ elif mode.startswith("📉"):
                 st.session_state.d_prices = prices_d
                 st.session_state.d_error  = None
                 if apply_btn_d:
-                    st.toast("✅ Data berhasil diperbarui!", icon="✅")
+                    st.toast("Data berhasil diperbarui!", icon="✅")
         except Exception as e:
             st.session_state.d_error = f"❌ Kesalahan membaca data: {e}"
 
@@ -923,10 +1004,10 @@ elif mode.startswith("📉"):
     mu_d      = calculate_expected_returns(returns_d)
 
     M_slider_d = st.slider(
-        "🎚️ Target Return (M)",
+        "Target Return (M)",
         min_value=0.0, max_value=float(max(mu_d)),
         value=round(float(max(mu_d)) * 0.4, 3),
-        step=0.01, format="%.2f", key="d_slider",
+        step=0.01, format="%.2f%%", key="d_slider",
     )
     st.divider()
 
@@ -934,22 +1015,22 @@ elif mode.startswith("📉"):
         x_opt_d, risk_d, ret_d, mu_d_arr, success_d = solve_downside_portfolio(M_slider_d, returns_d)
 
     if not success_d:
-        st.warning(f"⚠️ Tidak ditemukan solusi feasible untuk M = {M_slider_d:.2f}.")
+        st.warning(f"Tidak ditemukan solusi feasible untuk M = {M_slider_d:.2f}%.")
         st.stop()
     risk_std_d = np.sqrt(risk_d)
 
-    st.subheader(f"📊 Hasil Optimasi — Target M = {M_slider_d:.2f}")
+    st.subheader(f"Hasil Optimasi — Target M = {M_slider_d:.2f}%")
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("🎯 Target Return (M)",        f"{M_slider_d:.4f}")
-    mc2.metric("📈 Expected Return Aktual",   f"{ret_d:.4f}")
-    mc3.metric("📉 Downside Risk (Semi-Var)", f"{risk_d:.4f}")
-    mc4.metric("📊 Downside Std Dev",         f"{risk_std_d:.4f}")
+    mc1.metric("Target Return (M)",        f"{M_slider_d:.4f}%")
+    mc2.metric("Expected Return Aktual",   f"{ret_d:.4f}%")
+    mc3.metric("Downside Risk (Semi-Var)", f"{risk_d:.4f}")
+    mc4.metric("Downside Std Dev",         f"{risk_std_d:.4f}%")
     st.divider()
 
-    with st.expander("📊 Expected Return & Alokasi Optimal per Aset"):
+    with st.expander("Expected Return & Alokasi Optimal per Aset"):
         df_mu_d = pd.DataFrame({
             "Aset":            assets_d,
-            "Expected Return": [f"{v:.4f}" for v in mu_d_arr],
+            "Expected Return": [f"{v:.4f}%" for v in mu_d_arr],
             "Alokasi Optimal": [f"{x_opt_d[i]*100:.2f}%" for i in range(len(assets_d))],
         })
         st.dataframe(df_mu_d, use_container_width=True, hide_index=True)
@@ -962,16 +1043,16 @@ elif mode.startswith("📉"):
     col_g1d, col_g2d = st.columns(2, gap="medium")
 
     with col_g1d:
-        st.markdown("#### 📈 Downside Risk-Reward Characteristic")
+        st.markdown("#### Downside Risk-Reward Characteristic")
         fig_d1, ax_d1 = plt.subplots(figsize=(7, 5))
         ax_d1.plot(feasible_M_d, risks_std_d, linewidth=2.5, marker="o",
                    color="#d62728", label="Downside Risk-Reward")
         y_fill_min_d = max(0.0, min(risks_std_d) * 0.8)
         ax_d1.fill_between(feasible_M_d, risks_std_d, y_fill_min_d, alpha=0.1, color="#d62728")
         ax_d1.scatter(M_slider_d, risk_std_d, s=200, marker="*", color="green",
-                      edgecolors="darkgreen", zorder=5, label=f"Selected (M={M_slider_d:.2f})")
-        ax_d1.set_xlabel("Target Return (M)", fontsize=11, fontweight="bold")
-        ax_d1.set_ylabel("Downside Risk (Std Dev)", fontsize=11, fontweight="bold")
+                      edgecolors="darkgreen", zorder=5, label=f"Selected (M={M_slider_d:.2f}%)")
+        ax_d1.set_xlabel("Target Return M (%)", fontsize=11, fontweight="bold")
+        ax_d1.set_ylabel("Downside Risk — Std Dev (%)", fontsize=11, fontweight="bold")
         ax_d1.set_title("Downside Risk-Reward Characteristic", fontsize=13, fontweight="bold")
         ax_d1.legend(loc="upper left", fontsize=9)
         ax_d1.grid(True, linestyle="--", alpha=0.4)
@@ -979,16 +1060,16 @@ elif mode.startswith("📉"):
         fig_d1.tight_layout(); st.pyplot(fig_d1); plt.close(fig_d1)
 
     with col_g2d:
-        st.markdown("#### 📉 Portfolio Diversification (Downside)")
+        st.markdown("#### Portfolio Diversification (Downside)")
         fig_d2, ax_d2 = plt.subplots(figsize=(7, 5))
         for i, a in enumerate(assets_d):
             ax_d2.plot(feasible_M_d, alloc_dict_d[i],
                        linewidth=2.5, marker="o", markersize=4,
                        label=a, color=COLORS[i % len(COLORS)])
         ax_d2.axvline(M_slider_d, color="red", linestyle="--", alpha=0.75,
-                      linewidth=2, label=f"Target Return: {M_slider_d:.2f}")
-        ax_d2.set_xlabel("Target Return (M)", fontsize=11, fontweight="bold")
-        ax_d2.set_ylabel("Budget Fraction",    fontsize=11, fontweight="bold")
+                      linewidth=2, label=f"Target Return: {M_slider_d:.2f}%")
+        ax_d2.set_xlabel("Target Return M (%)", fontsize=11, fontweight="bold")
+        ax_d2.set_ylabel("Budget Fraction",      fontsize=11, fontweight="bold")
         ax_d2.set_title("Portfolio Diversification (Downside)", fontsize=13, fontweight="bold")
         ax_d2.legend(loc="center right", fontsize=9)
         ax_d2.grid(True, linestyle="--", alpha=0.3)
@@ -1001,28 +1082,28 @@ elif mode.startswith("📉"):
     col_tbl_d, col_rec_d = st.columns([3, 2], gap="large")
 
     with col_tbl_d:
-        st.markdown("#### 📋 Tabel Alokasi Berbagai Target Return")
+        st.markdown("#### Tabel Alokasi Berbagai Target Return")
         sample_M_d = np.linspace(0, float(max(mu_list_d)), 5)
         tbl_rows_d = []
         for M_k in sample_M_d:
             x_k, r_k, rr_k, _, ok_k = solve_downside_portfolio(float(M_k), returns_d)
             if ok_k:
-                row = {"Target Return": f"{M_k:.4f}", "Downside Risk": f"{r_k:.4f}"}
+                row = {"Target Return (%)": f"{M_k:.4f}%", "Downside Risk": f"{r_k:.4f}"}
                 for i, a in enumerate(assets_d):
                     row[a] = f"{x_k[i]*100:.1f}%"
                 tbl_rows_d.append(row)
         st.dataframe(tbl_rows_d, use_container_width=True, hide_index=True)
         st.info(
-            f"📌 **M = {M_slider_d:.2f}** → "
+            f"M = {M_slider_d:.2f}% → "
             + " | ".join([f"{assets_d[i]}: **{x_opt_d[i]*100:.1f}%**" for i in range(len(assets_d))])
-            + f" | Downside Risk: **{risk_std_d:.4f}**"
+            + f" | Downside Std Dev: **{risk_std_d:.4f}%**"
         )
-        st.markdown("#### 📋 Scenario Returns (10 Baris Pertama)")
+        st.markdown("#### Scenario Returns (10 Baris Pertama)")
         df_ret_d = pd.DataFrame(returns_d, columns=assets_d)
-        st.dataframe(df_ret_d.head(10), use_container_width=True)
+        st.dataframe(df_ret_d.head(10).applymap(lambda x: f"{x:.4f}%"), use_container_width=True)
 
     with col_rec_d:
-        st.markdown(f"#### 💡 Rekomendasi untuk M = {M_slider_d:.2f}")
+        st.markdown(f"#### Rekomendasi untuk M = {M_slider_d:.2f}%")
         fig_bar_d, ax_bar_d = plt.subplots(figsize=(5, max(3, len(assets_d) * 1.0)))
         bars_d = ax_bar_d.barh(
             assets_d, x_opt_d * 100,
@@ -1035,17 +1116,17 @@ elif mode.startswith("📉"):
                           f"{val:.1f}%", va="center", fontsize=10, fontweight="bold")
         ax_bar_d.set_xlim(0, 115)
         ax_bar_d.set_xlabel("Alokasi (%)", fontsize=10)
-        ax_bar_d.set_title(f"Komposisi Portofolio (M = {M_slider_d:.2f})", fontsize=11, fontweight="bold")
+        ax_bar_d.set_title(f"Komposisi Portofolio (M = {M_slider_d:.2f}%)", fontsize=11, fontweight="bold")
         ax_bar_d.grid(axis="x", linestyle="--", alpha=0.4)
         ax_bar_d.spines["top"].set_visible(False); ax_bar_d.spines["right"].set_visible(False)
         fig_bar_d.tight_layout(); st.pyplot(fig_bar_d); plt.close(fig_bar_d)
 
-        st.markdown("**📊 Analisis Risk-Reward:**")
+        st.markdown("**Analisis Risk-Reward:**")
         r_low_d, r_high_d = min(risks_std_d), max(risks_std_d)
         delta_pct_d = (r_high_d - r_low_d) / r_low_d * 100
         st.markdown(
-            f"- Return terendah (0.00) → downside risk = **{r_low_d:.4f}**\n"
-            f"- Return tertinggi ({max(mu_list_d):.2f}) → downside risk = **{r_high_d:.4f}**\n"
+            f"- Return terendah (0.00%) → downside risk = **{r_low_d:.4f}%**\n"
+            f"- Return tertinggi ({max(mu_list_d):.2f}%) → downside risk = **{r_high_d:.4f}%**\n"
             f"- Risk naik sebesar **{delta_pct_d:.1f}%** dari min ke max return"
         )
 
@@ -1054,12 +1135,12 @@ elif mode.startswith("📉"):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# ════════════════  PIECEWISE LINEAR (MILP)  ══════════════════════════
+# PIECEWISE LINEAR (MILP)
 # ══════════════════════════════════════════════════════════════════════
 else:  # Piecewise
 
     with st.sidebar:
-        st.header("⚙️ Input — Piecewise Linear")
+        st.header("Input — Piecewise Linear")
         st.caption("Atur parameter MILP dan data harga.")
         assets_input_p = st.text_input("Nama Aset (pisahkan koma)", value=DEFAULT_ASSETS, key="p_assets_input")
         prices_input_p = st.text_area(
@@ -1067,12 +1148,13 @@ else:  # Piecewise
             value=DEFAULT_PRICES, height=220, key="p_prices_input",
             help="Satu baris per periode; nilai dipisahkan koma",
         )
-        apply_btn_p = st.button("✅ Terapkan Data Baru", use_container_width=True, type="primary", key="p_apply")
+        apply_btn_p = st.button("Terapkan Data Baru", use_container_width=True, type="primary", key="p_apply")
         st.divider()
         st.markdown("**Parameter Optimasi:**")
-        p_target   = st.slider("Target Return (M)",     0.00, 0.55, 0.20, 0.01, key="p_target")
-        p_minfrac  = st.slider("Min. Investment per Aset", 0.01, 0.20, 0.05, 0.01, key="p_minfrac",
-                                help="0 OR ≥ nilai ini (constraint binary)")
+        p_target   = st.slider("Target Return (M)",     0.00, 0.55, 0.20, 0.01, key="p_target",
+                                format="%.2f%%")
+        p_minfrac  = st.slider("Min. Investment per Aset (%)", 1, 20, 5, 1, key="p_minfrac",
+                                help="0 ATAU >= nilai ini (constraint binary)")
         p_epsilon  = st.slider("Epsilon (ε)",           0.01, 1.00, 0.10, 0.01, key="p_epsilon",
                                 help="Toleransi error aproksimasi piecewise")
         p_segments = st.slider("Jumlah Interval (manual)", 2, 50, 10, 1, key="p_segments",
@@ -1081,7 +1163,7 @@ else:  # Piecewise
                                   help="Hitung K otomatis: ceil(q_max / 2√ε)")
         st.divider()
         st.markdown(
-            "**⚠️ Logical Constraint (hardcoded):**\n\n"
+            "**Logical Constraint (hardcoded):**\n\n"
             "Jika alokasi **RD > 20%**, maka alokasi **KLM < 30%**"
         )
 
@@ -1100,7 +1182,7 @@ else:  # Piecewise
                 st.session_state.p_prices = prices_p
                 st.session_state.p_error  = None
                 if apply_btn_p:
-                    st.toast("✅ Data berhasil diperbarui!", icon="✅")
+                    st.toast("Data berhasil diperbarui!", icon="✅")
         except Exception as e:
             st.session_state.p_error = f"❌ Kesalahan membaca data: {e}"
 
@@ -1111,6 +1193,7 @@ else:  # Piecewise
     assets_p  = st.session_state.p_assets
     prices_p  = st.session_state.p_prices
     returns_p = calculate_returns(prices_p)
+    p_minfrac_val = p_minfrac / 100.0
     st.divider()
 
     with st.spinner("Menyelesaikan MILP... (mungkin 5–15 detik)"):
@@ -1118,49 +1201,49 @@ else:  # Piecewise
             return_matrix=returns_p,
             asset_names=assets_p,
             target_return=p_target,
-            min_fraction=p_minfrac,
+            min_fraction=p_minfrac_val,
             epsilon=p_epsilon,
             segments=p_segments,
             use_dynamic=p_dynamic,
         )
 
-    # ── STATUS ──
-    status_color = "🟢" if result_p["status"] == "Optimal" else "🔴"
-    st.subheader(f"📊 Hasil Optimasi MILP — {status_color} {result_p['status']}")
+    # STATUS
+    status_color = "Optimal" if result_p["status"] == "Optimal" else "Tidak Optimal"
+    st.subheader(f"Hasil Optimasi MILP — {status_color}: {result_p['status']}")
 
     mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-    mc1.metric("🎯 Target Return (M)",    f"{p_target:.4f}")
-    mc2.metric("📈 Expected Return",      f"{result_p['expected_return']:.4f}")
-    mc3.metric("📉 Piecewise Risk",       f"{result_p['risk']:.4f}")
-    mc4.metric("🔢 Interval Digunakan",   f"{result_p['segments']}")
-    mc5.metric("⚠️ Max Approx Error",     f"{result_p['max_error']:.6f}")
+    mc1.metric("Target Return (M)",     f"{p_target:.2f}%")
+    mc2.metric("Expected Return",       f"{result_p['expected_return']:.4f}%")
+    mc3.metric("Piecewise Risk",        f"{result_p['risk']:.4f}")
+    mc4.metric("Interval Digunakan",    f"{result_p['segments']}")
+    mc5.metric("Max Approx Error",      f"{result_p['max_error']:.6f}")
     st.divider()
 
-    # ── TABEL ALOKASI ──
+    # TABEL ALOKASI
     col_tbl_p, col_pie_p = st.columns([3, 2], gap="large")
 
     with col_tbl_p:
-        st.markdown("#### 📋 Tabel Alokasi & Aset Terpilih")
+        st.markdown("#### Tabel Alokasi & Aset Terpilih")
         alloc_df = pd.DataFrame({
             "Aset":           assets_p,
             "Dipilih (0/1)":  [result_p["selected"][a] for a in assets_p],
-            "Alokasi (%)":    [f"{result_p['allocation'][a]*100:.2f}%" for a in assets_p],
+            "Alokasi (%)":    [f"{(result_p['allocation'][a] or 0)*100:.2f}%" for a in assets_p],
         })
         st.dataframe(alloc_df, use_container_width=True, hide_index=True)
 
         # Logical constraint check
         rd_alloc  = result_p["allocation"].get("RD", 0) or 0
         klm_alloc = result_p["allocation"].get("KLM", 0) or 0
-        st.markdown("#### ⚖️ Cek Logical Constraint (RD > 20% → KLM < 30%)")
+        st.markdown("#### Cek Logical Constraint (RD > 20% → KLM < 30%)")
         if rd_alloc > 0.20:
             if klm_alloc < 0.30:
-                st.success(f"✅ RD = {rd_alloc*100:.1f}% > 20% dan KLM = {klm_alloc*100:.1f}% < 30% — Constraint terpenuhi")
+                st.success(f"RD = {rd_alloc*100:.1f}% > 20% dan KLM = {klm_alloc*100:.1f}% < 30% — Constraint terpenuhi")
             else:
-                st.error(f"❌ RD = {rd_alloc*100:.1f}% > 20% tetapi KLM = {klm_alloc*100:.1f}% ≥ 30% — Dilanggar!")
+                st.error(f"RD = {rd_alloc*100:.1f}% > 20% tetapi KLM = {klm_alloc*100:.1f}% >= 30% — Dilanggar!")
         else:
-            st.info(f"ℹ️ RD = {rd_alloc*100:.1f}% ≤ 20% — Logical constraint tidak aktif")
+            st.info(f"RD = {rd_alloc*100:.1f}% <= 20% — Logical constraint tidak aktif")
 
-        st.markdown("#### 📋 Dynamic Interval Report")
+        st.markdown("#### Dynamic Interval Report")
         st.markdown(
             f"- ε = **{result_p['epsilon']}** | "
             f"q_max = **{result_p['qmax']:.4f}** | "
@@ -1168,7 +1251,7 @@ else:  # Piecewise
         )
 
     with col_pie_p:
-        st.markdown("#### 🥧 Komposisi Portofolio")
+        st.markdown("#### Komposisi Portofolio")
         alloc_vals = [result_p["allocation"][a] or 0 for a in assets_p]
         nonzero_labels = [assets_p[i] for i, v in enumerate(alloc_vals) if v > 0.001]
         nonzero_vals   = [v for v in alloc_vals if v > 0.001]
@@ -1182,11 +1265,11 @@ else:  # Piecewise
 
     st.divider()
 
-    # ── 3 GRAFIK BAWAH ──
+    # 3 GRAFIK BAWAH
     col_sel, col_err, col_pw = st.columns(3, gap="medium")
 
     with col_sel:
-        st.markdown("#### ✅ Selected Assets")
+        st.markdown("#### Selected Assets")
         fig_sel, ax_sel = plt.subplots(figsize=(5, 4))
         sel_vals = [result_p["selected"][a] for a in assets_p]
         ax_sel.bar(assets_p, sel_vals,
@@ -1200,7 +1283,7 @@ else:  # Piecewise
         fig_sel.tight_layout(); st.pyplot(fig_sel); plt.close(fig_sel)
 
     with col_err:
-        st.markdown("#### 📐 Approximation Error per Interval")
+        st.markdown("#### Approximation Error per Interval")
         fig_err, ax_err = plt.subplots(figsize=(5, 4))
         ax_err.bar(range(len(result_p["errors"])), result_p["errors"],
                    color="#9467bd", edgecolor="white")
@@ -1212,29 +1295,13 @@ else:  # Piecewise
         fig_err.tight_layout(); st.pyplot(fig_err); plt.close(fig_err)
 
     with col_pw:
-        st.markdown("#### 📈 Piecewise vs Quadratic")
-        qmax_p  = result_p["qmax"]
-        x_arr   = np.linspace(0, qmax_p, 300)
-        breaks  = result_p["breaks"]
-        slopes  = result_p["slopes"]
-        pw_vals = []
-        for xx in x_arr:
-            vpw = 0
-            for i in range(len(slopes)):
-                left, right = breaks[i], breaks[i+1]
-                used = min(max(xx - left, 0), right - left)
-                vpw += slopes[i] * used
-            pw_vals.append(vpw)
-        fig_pw, ax_pw = plt.subplots(figsize=(5, 4))
-        ax_pw.plot(x_arr, x_arr**2,  linewidth=2.5, label="Quadratic q²", color="#1f77b4")
-        ax_pw.plot(x_arr, pw_vals, "--", linewidth=2.5, label="Piecewise", color="#d62728")
-        ax_pw.set_xlabel("q", fontsize=10)
-        ax_pw.set_ylabel("Risk", fontsize=10)
-        ax_pw.set_title("Piecewise Approximation", fontsize=11, fontweight="bold")
-        ax_pw.legend(fontsize=9)
-        ax_pw.grid(True, linestyle="--", alpha=0.4)
-        ax_pw.spines["top"].set_visible(False); ax_pw.spines["right"].set_visible(False)
-        fig_pw.tight_layout(); st.pyplot(fig_pw); plt.close(fig_pw)
+        st.markdown("#### Piecewise Linear vs Kuadratik")
+        n_show = min(4, len(result_p["breaks"]) - 2)
+        fig_pw = plot_piecewise_illustration(
+            result_p["breaks"], result_p["slopes"], result_p["qmax"],
+            n_breakpoints_show=n_show,
+        )
+        st.pyplot(fig_pw); plt.close(fig_pw)
 
     st.divider()
     st.caption("Model: Piecewise Linear MILP (CBC Solver / PuLP) | AIMMS Chapter 18 Exercise 18.3")
