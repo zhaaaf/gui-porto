@@ -32,7 +32,12 @@ st.set_page_config(
     layout="wide",
 )
 
-COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+COLORS = ['#4361EE', '#F72585', '#4CC9F0', '#7209B7', '#3A0CA3', '#560BAD']
+C_LINE  = '#4361EE'   # warna garis utama Risk-Reward
+C_FILL  = '#4361EE'   # warna fill di bawah kurva
+C_DOT   = '#E63946'   # titik-titik di kurva
+C_GOLD  = '#FFB703'   # titik emas untuk portfolio terpilih
+C_DOWN  = '#F72585'   # warna Downside model
 
 # ══════════════════════════════════════════════════════════════════════
 # SHARED HELPERS
@@ -410,14 +415,16 @@ def _pw_value(q, breaks, slopes):
         v += slopes[i] * used
     return v
 
-def plot_piecewise_illustration(qmax):
+def plot_piecewise_illustration(qmax, breaks_actual=None, slopes_actual=None):
     """
     Plot Figure 18.6-style: kuadratik q² vs aproksimasi piecewise linear.
-    Selalu gunakan 3 segmen agar visual jelas (seperti Figure 18.6),
-    terlepas dari jumlah segmen aktual yang digunakan di optimisasi.
+    Jika breaks/slopes dari data tersedia, gunakan segmen aktual.
     """
-    N_ILLUSTRATE = 3  # jumlah segmen untuk ilustrasi — persis seperti Figure 18.6
-    breaks_ill, slopes_ill, _, _ = build_piecewise(qmax, N_ILLUSTRATE)
+    if breaks_actual is not None and slopes_actual is not None:
+        breaks_ill = np.array(breaks_actual)
+        slopes_ill = list(slopes_actual)
+    else:
+        breaks_ill, slopes_ill, _, _ = build_piecewise(qmax, 3)
 
     x_dense = np.linspace(0, qmax, 400)
     quad_vals = x_dense ** 2
@@ -787,25 +794,25 @@ elif mode.startswith("Strategic"):
     with col_g2:
         st.markdown("#### Risk-Reward Characteristic")
         fig2, ax2 = plt.subplots(figsize=(7, 5))
-        ax2.plot(feasible_M_levels, risks_std_curve, "b-", linewidth=2.5,
+        ax2.plot(feasible_M_levels, risks_std_curve, linewidth=2.5, color=C_LINE,
                  label="Risk-Reward Characteristic")
         y_fill_min = max(0.0, min(risks_std_curve) * 0.8)
-        ax2.fill_between(feasible_M_levels, risks_std_curve, y_fill_min, alpha=0.1, color="blue")
+        ax2.fill_between(feasible_M_levels, risks_std_curve, y_fill_min, alpha=0.08, color=C_FILL)
         for idx, M_val in enumerate(M_specific):
             if specific_risks[idx] is not None:
-                ax2.plot(M_val, specific_risks[idx], "ro", markersize=10,
-                         markeredgecolor="darkred", markeredgewidth=1.5)
+                ax2.plot(M_val, specific_risks[idx], "o", markersize=8,
+                         color=C_DOT, markeredgecolor="white", markeredgewidth=1.2, zorder=4)
                 ax2.annotate(f"{specific_risks[idx]:.3f}%", xy=(M_val, specific_risks[idx]),
                              xytext=(8, 5), textcoords="offset points",
-                             fontsize=9, fontweight="bold", color="darkred")
-        ax2.plot(M_target, risk_opt_std, "g*", markersize=18,
-                 markeredgecolor="darkgreen", markeredgewidth=1.5,
-                 label=f"Selected Portfolio (M = {M_target:.4f}%)", zorder=5)
+                             fontsize=8.5, fontweight="bold", color=C_DOT)
+        ax2.plot(M_target, risk_opt_std, "o", markersize=14, color=C_GOLD,
+                 markeredgecolor="white", markeredgewidth=1.8,
+                 label=f"Selected Portfolio (M = {M_target:.2f}%)", zorder=5)
         ax2.set_xlabel("Minimal level of expected return (%)", fontsize=11, fontweight="bold")
         ax2.set_ylabel("Portfolio risk — Std Dev (%)",         fontsize=11, fontweight="bold")
         ax2.set_title("Risk-Reward Characteristic", fontsize=13, fontweight="bold")
         ax2.legend(loc="upper left", fontsize=9)
-        ax2.grid(True, linestyle="--", alpha=0.4)
+        ax2.grid(True, linestyle="--", alpha=0.3)
         ax2.spines["top"].set_visible(False); ax2.spines["right"].set_visible(False)
         fig2.tight_layout(); st.pyplot(fig2); plt.close(fig2)
 
@@ -954,12 +961,13 @@ elif mode.startswith("Tactical"):
     with col_g1t:
         st.markdown("#### Risk-Reward Characteristic")
         fig4, ax4 = plt.subplots(figsize=(7, 5))
-        ax4.plot(feasible_M_t, risks_std_t, linewidth=2.5, marker="o",
-                 color="#1f77b4", label="Risk-Reward Characteristic")
+        ax4.plot(feasible_M_t, risks_std_t, linewidth=2.5, color=C_LINE,
+                 label="Risk-Reward Characteristic")
         y_fill_min_t = max(0.0, min(risks_std_t) * 0.8)
-        ax4.fill_between(feasible_M_t, risks_std_t, y_fill_min_t, alpha=0.1, color="#1f77b4")
-        ax4.scatter(M_slider, risk_std_t, s=200, marker="*", color="green",
-                    edgecolors="darkgreen", zorder=5, label=f"Selected (M={M_slider:.2f}%)")
+        ax4.fill_between(feasible_M_t, risks_std_t, y_fill_min_t, alpha=0.08, color=C_FILL)
+        ax4.plot(M_slider, risk_std_t, "o", markersize=14, color=C_GOLD,
+                 markeredgecolor="white", markeredgewidth=1.8,
+                 zorder=5, label=f"Selected (M={M_slider:.2f}%)")
         ax4.set_xlabel("Minimal Expected Return (%)", fontsize=11, fontweight="bold")
         ax4.set_ylabel("Portfolio Risk — Std Dev (%)", fontsize=11, fontweight="bold")
         ax4.set_title("Risk-Reward Characteristic", fontsize=13, fontweight="bold")
@@ -1137,12 +1145,13 @@ elif mode.startswith("Downside"):
     with col_g1d:
         st.markdown("#### Downside Risk-Reward Characteristic")
         fig_d1, ax_d1 = plt.subplots(figsize=(7, 5))
-        ax_d1.plot(feasible_M_d, risks_std_d, linewidth=2.5, marker="o",
-                   color="#d62728", label="Downside Risk-Reward")
+        ax_d1.plot(feasible_M_d, risks_std_d, linewidth=2.5, color=C_DOWN,
+                   label="Downside Risk-Reward")
         y_fill_min_d = max(0.0, min(risks_std_d) * 0.8)
-        ax_d1.fill_between(feasible_M_d, risks_std_d, y_fill_min_d, alpha=0.1, color="#d62728")
-        ax_d1.scatter(M_slider_d, risk_std_d, s=200, marker="*", color="green",
-                      edgecolors="darkgreen", zorder=5, label=f"Selected (M={M_slider_d:.2f}%)")
+        ax_d1.fill_between(feasible_M_d, risks_std_d, y_fill_min_d, alpha=0.08, color=C_DOWN)
+        ax_d1.plot(M_slider_d, risk_std_d, "o", markersize=14, color=C_GOLD,
+                   markeredgecolor="white", markeredgewidth=1.8,
+                   zorder=5, label=f"Selected (M={M_slider_d:.2f}%)")
         ax_d1.set_xlabel("Target Return M (%)", fontsize=11, fontweight="bold")
         ax_d1.set_ylabel("Downside Risk — Std Dev (%)", fontsize=11, fontweight="bold")
         ax_d1.set_title("Downside Risk-Reward Characteristic", fontsize=13, fontweight="bold")
@@ -1396,7 +1405,11 @@ else:  # Piecewise
 
     with col_pw:
         st.markdown("#### Piecewise Linear vs Kuadratik")
-        fig_pw = plot_piecewise_illustration(result_p["qmax"])
+        fig_pw = plot_piecewise_illustration(
+            result_p["qmax"],
+            breaks_actual=result_p["breaks"],
+            slopes_actual=result_p["slopes"],
+        )
         st.pyplot(fig_pw); plt.close(fig_pw)
 
     st.divider()
