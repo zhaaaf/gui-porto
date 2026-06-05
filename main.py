@@ -120,50 +120,63 @@ PERIOD_OPTIONS = {
     "5 tahun": "5y",
 }
 
+FREQ_OPTIONS = {
+    "Mingguan (sesuai AIMMS)": {"resample": "W",  "label": "minggu", "min_periods": 8},
+    "Bulanan":                  {"resample": "ME", "label": "bulan",  "min_periods": 4},
+    "Harian":                   {"resample": None, "label": "hari",   "min_periods": 20},
+}
+
+def _get_close(tickers, period):
+    """Helper: download & normalisasi kolom Close dari yfinance."""
+    raw = yf.download(tickers, period=period, auto_adjust=True, progress=False)
+    if raw.empty:
+        return None, "Data tidak ditemukan. Periksa kembali nama ticker."
+    if len(tickers) == 1:
+        close = raw[["Close"]].copy()
+        close.columns = tickers
+    else:
+        close = raw["Close"].copy()
+    return close, None
+
 @st.cache_data(show_spinner=False)
-def fetch_yfinance(tickers_str, period):
-    """Download harga, resample ke bulanan, hitung return & kovarians bulanan (% per bulan)."""
+def fetch_yfinance(tickers_str, period, freq_key="Mingguan (sesuai AIMMS)"):
+    """Download harga, resample sesuai frekuensi, hitung return & kovarians."""
     tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
     if not tickers:
         return None, None, None, "Tidak ada ticker yang valid."
+    freq_cfg = FREQ_OPTIONS[freq_key]
     try:
-        raw = yf.download(tickers, period=period, auto_adjust=True, progress=False)
-        if raw.empty:
-            return None, None, None, "Data tidak ditemukan. Periksa kembali nama ticker."
-        if len(tickers) == 1:
-            close = raw[["Close"]].copy()
-            close.columns = tickers
-        else:
-            close = raw["Close"].copy()
-        # Resample ke harga penutupan akhir bulan agar return bermakna (~1-3%/bulan)
-        close = close.resample("ME").last().dropna()
-        if len(close) < 4:
-            return None, None, None, "Data terlalu sedikit setelah resample bulanan (< 4 bulan)."
-        rets = close.pct_change().dropna() * 100  # % per bulan
+        close, err = _get_close(tickers, period)
+        if err:
+            return None, None, None, err
+        if freq_cfg["resample"]:
+            close = close.resample(freq_cfg["resample"]).last()
+        close = close.dropna()
+        min_p = freq_cfg["min_periods"]
+        if len(close) < min_p:
+            return None, None, None, f"Data terlalu sedikit (< {min_p} {freq_cfg['label']})."
+        rets = close.pct_change().dropna() * 100
         rets = rets.dropna(axis=1, how="all")
         available_tickers = list(rets.columns)
-        mu  = rets.mean().values
-        cov = rets.cov().values
-        return available_tickers, mu, cov, None
+        return available_tickers, rets.mean().values, rets.cov().values, None
     except Exception as e:
         return None, None, None, f"Error mengambil data: {e}"
 
 @st.cache_data(show_spinner=False)
-def fetch_prices_monthly(tickers_str, period):
-    """Download & resample ke harga bulanan, kembalikan DataFrame harga."""
+def fetch_prices(tickers_str, period, freq_key="Mingguan (sesuai AIMMS)"):
+    """Download harga & resample sesuai frekuensi, kembalikan array harga."""
     tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+    freq_cfg = FREQ_OPTIONS[freq_key]
     try:
-        raw = yf.download(tickers, period=period, auto_adjust=True, progress=False)
-        if raw.empty:
-            return None, None, "Data tidak ditemukan."
-        if len(tickers) == 1:
-            close = raw[["Close"]].copy()
-            close.columns = tickers
-        else:
-            close = raw["Close"].copy()
-        close = close.resample("ME").last().dropna()
-        if len(close) < 4:
-            return None, None, "Data terlalu sedikit (< 4 bulan)."
+        close, err = _get_close(tickers, period)
+        if err:
+            return None, None, err
+        if freq_cfg["resample"]:
+            close = close.resample(freq_cfg["resample"]).last()
+        close = close.dropna()
+        min_p = freq_cfg["min_periods"]
+        if len(close) < min_p:
+            return None, None, f"Data terlalu sedikit (< {min_p} {freq_cfg['label']})."
         available = list(close.columns)
         return available, close.values, None
     except Exception as e:
@@ -509,6 +522,22 @@ with st.sidebar:
             st.session_state["page"] = page_name
             st.rerun()
     st.divider()
+    st.markdown("**Frekuensi Data**")
+    freq_key = st.selectbox(
+        "Frekuensi resampling",
+        options=list(FREQ_OPTIONS.keys()),
+        index=0,
+        key="global_freq",
+        label_visibility="collapsed",
+        help="Mingguan sesuai data AIMMS Ch.18 (~51 periode/tahun). Bulanan lebih stabil. Harian lebih noise.",
+    )
+    freq_label = FREQ_OPTIONS[freq_key]["label"]
+    st.caption({
+        "Mingguan (sesuai AIMMS)": "Sesuai buku AIMMS Ch.18 — ~52 titik/tahun",
+        "Bulanan":                  "Return ~1-3%/bulan — umum di literatur",
+        "Harian":                   "Noise tinggi — cocok trader aktif",
+    }[freq_key])
+    st.divider()
 
 mode = st.session_state["page"]
 
@@ -691,8 +720,8 @@ elif mode.startswith("Strategic"):
     if fetch_btn or st.session_state.s_cats is None:
         if fetch_btn or st.session_state.s_cats is None:
             period_code = PERIOD_OPTIONS[period_label]
-            with st.spinner(f"Mengambil data dari Yahoo Finance ({period_label})..."):
-                tickers_result, mu_yf, cov_yf, err = fetch_yfinance(tickers_input, period_code)
+            with st.spinner(f"Mengambil data {freq_key} dari Yahoo Finance ({period_label})..."):
+                tickers_result, mu_yf, cov_yf, err = fetch_yfinance(tickers_input, period_code, freq_key)
             if err:
                 st.session_state.s_error = f"❌ {err}"
             else:
@@ -763,10 +792,10 @@ elif mode.startswith("Strategic"):
 
     st.subheader(f"Hasil Optimasi — Target M = {M_target:.2f}% / bulan")
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("Target Return / Bulan",      f"{M_target:.2f}%")
-    mc2.metric("Expected Return Aktual / Bulan", f"{return_opt:.2f}%")
+    mc1.metric("Target Return / Periode",      f"{M_target:.2f}%")
+    mc2.metric("Expected Return Aktual / Periode", f"{return_opt:.2f}%")
     mc3.metric("Risiko (Varians)",           f"{risk_opt_var:.4f}")
-    mc4.metric("Standar Deviasi / Bulan",    f"{risk_opt_std:.2f}%")
+    mc4.metric("Standar Deviasi / Periode",    f"{risk_opt_std:.2f}%")
     st.divider()
 
     col_g1, col_g2 = st.columns(2, gap="medium")
@@ -897,7 +926,7 @@ elif mode.startswith("Tactical"):
 
     if fetch_btn_t or st.session_state.t_assets is None:
         with st.spinner("Mengambil data bulanan dari Yahoo Finance..."):
-            tickers_t, prices_t_arr, err_t = fetch_prices_monthly(tickers_input_t, PERIOD_OPTIONS[period_label_t])
+            tickers_t, prices_t_arr, err_t = fetch_prices(tickers_input_t, PERIOD_OPTIONS[period_label_t], freq_key)
         if err_t:
             st.session_state.t_error = f"❌ {err_t}"
         else:
@@ -922,7 +951,7 @@ elif mode.startswith("Tactical"):
     mu      = calculate_expected_returns(returns)
 
     M_slider = st.slider(
-        "Target Return per Bulan (M)",
+        "Target Return per Periode (M)",
         min_value=0.0, max_value=float(max(mu)),
         value=round(float(max(mu)) * 0.4, 3),
         step=round(float(max(mu)) / 50, 3),
@@ -938,10 +967,10 @@ elif mode.startswith("Tactical"):
 
     st.subheader(f"Hasil Optimasi — Target M = {M_slider:.2f}% / bulan")
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("Target Return / Bulan",      f"{M_slider:.2f}%")
-    mc2.metric("Expected Return Aktual / Bulan", f"{ret_t:.2f}%")
+    mc1.metric("Target Return / Periode",      f"{M_slider:.2f}%")
+    mc2.metric("Expected Return Aktual / Periode", f"{ret_t:.2f}%")
     mc3.metric("Risiko (Varians)",           f"{risk_t:.4f}")
-    mc4.metric("Standar Deviasi / Bulan",    f"{risk_std_t:.2f}%")
+    mc4.metric("Standar Deviasi / Periode",    f"{risk_std_t:.2f}%")
     st.divider()
 
     with st.expander("Expected Return & Alokasi Optimal per Aset"):
@@ -1078,7 +1107,7 @@ elif mode.startswith("Downside"):
 
     if fetch_btn_d or st.session_state.d_assets is None:
         with st.spinner("Mengambil data bulanan dari Yahoo Finance..."):
-            tickers_d, prices_d_arr, err_d = fetch_prices_monthly(tickers_input_d, PERIOD_OPTIONS[period_label_d])
+            tickers_d, prices_d_arr, err_d = fetch_prices(tickers_input_d, PERIOD_OPTIONS[period_label_d], freq_key)
         if err_d:
             st.session_state.d_error = f"❌ {err_d}"
         else:
@@ -1103,7 +1132,7 @@ elif mode.startswith("Downside"):
     mu_d      = calculate_expected_returns(returns_d)
 
     M_slider_d = st.slider(
-        "Target Return per Bulan (M)",
+        "Target Return per Periode (M)",
         min_value=0.0, max_value=float(max(mu_d)),
         value=round(float(max(mu_d)) * 0.4, 3),
         step=round(float(max(mu_d)) / 50, 3),
@@ -1121,10 +1150,10 @@ elif mode.startswith("Downside"):
 
     st.subheader(f"Hasil Optimasi — Target M = {M_slider_d:.2f}% / bulan")
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("Target Return / Bulan",        f"{M_slider_d:.2f}%")
-    mc2.metric("Expected Return Aktual / Bulan", f"{ret_d:.2f}%")
+    mc1.metric("Target Return / Periode",        f"{M_slider_d:.2f}%")
+    mc2.metric("Expected Return Aktual / Periode", f"{ret_d:.2f}%")
     mc3.metric("Downside Risk (Semi-Var)",     f"{risk_d:.4f}")
-    mc4.metric("Downside Std Dev / Bulan",     f"{risk_std_d:.2f}%")
+    mc4.metric("Downside Std Dev / Periode",     f"{risk_std_d:.2f}%")
     st.divider()
 
     with st.expander("Expected Return & Alokasi Optimal per Aset"):
@@ -1273,7 +1302,7 @@ else:  # Piecewise
 
     if fetch_btn_p or st.session_state.p_assets is None:
         with st.spinner("Mengambil data bulanan dari Yahoo Finance..."):
-            tickers_p, prices_p_arr, err_p = fetch_prices_monthly(tickers_input_p, PERIOD_OPTIONS[period_label_p])
+            tickers_p, prices_p_arr, err_p = fetch_prices(tickers_input_p, PERIOD_OPTIONS[period_label_p], freq_key)
         if err_p:
             st.session_state.p_error = f"❌ {err_p}"
         elif len(tickers_p) < 2:
