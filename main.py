@@ -23,6 +23,8 @@ try:
 except ImportError:
     YFINANCE_AVAILABLE = False
 
+import urllib.request, json as _json
+
 # ══════════════════════════════════════════════════════════════════════
 # KONFIGURASI HALAMAN
 # ══════════════════════════════════════════════════════════════════════
@@ -33,11 +35,173 @@ st.set_page_config(
 )
 
 COLORS = ['#4361EE', '#F72585', '#4CC9F0', '#7209B7', '#3A0CA3', '#560BAD']
-C_LINE  = '#4361EE'   # warna garis utama Risk-Reward
-C_FILL  = '#4361EE'   # warna fill di bawah kurva
-C_DOT   = '#E63946'   # titik-titik di kurva
-C_GOLD  = '#FFB703'   # titik emas untuk portfolio terpilih
-C_DOWN  = '#F72585'   # warna Downside model
+C_LINE  = '#4361EE'
+C_FILL  = '#4361EE'
+C_DOT   = '#E63946'
+C_GOLD  = '#FFB703'
+C_DOWN  = '#F72585'
+
+# ══════════════════════════════════════════════════════════════════════
+# DAFTAR SAHAM POPULER (statis)
+# ══════════════════════════════════════════════════════════════════════
+
+IDX_POPULAR = {
+    # LQ45 Indonesia
+    "BBCA.JK": "Bank BCA",
+    "BBRI.JK": "Bank BRI",
+    "BMRI.JK": "Bank Mandiri",
+    "BBNI.JK": "Bank BNI",
+    "TLKM.JK": "Telkom Indonesia",
+    "ASII.JK": "Astra International",
+    "GOTO.JK": "GoTo Gojek Tokopedia",
+    "BREN.JK": "Barito Renewables",
+    "BYAN.JK": "Bayan Resources",
+    "MDKA.JK": "Merdeka Copper Gold",
+    "AMMN.JK": "Amman Mineral",
+    "TPIA.JK": "Chandra Asri",
+    "UNVR.JK": "Unilever Indonesia",
+    "KLBF.JK": "Kalbe Farma",
+    "ICBP.JK": "Indofood CBP",
+    "INDF.JK": "Indofood",
+    "SMGR.JK": "Semen Indonesia",
+    "ADRO.JK": "Adaro Energy",
+    "PTBA.JK": "Bukit Asam",
+    "ITMG.JK": "Indo Tambangraya",
+    "PGAS.JK": "Perusahaan Gas Negara",
+    "ANTM.JK": "Aneka Tambang",
+    "INCO.JK": "Vale Indonesia",
+    "MAPI.JK": "Mitra Adiperkasa",
+    "EXCL.JK": "XL Axiata",
+}
+
+US_POPULAR = {
+    "AAPL":  "Apple",
+    "MSFT":  "Microsoft",
+    "GOOGL": "Alphabet (Google)",
+    "AMZN":  "Amazon",
+    "NVDA":  "NVIDIA",
+    "META":  "Meta",
+    "TSLA":  "Tesla",
+    "BRK-B": "Berkshire Hathaway",
+    "JPM":   "JPMorgan Chase",
+    "JNJ":   "Johnson & Johnson",
+    "V":     "Visa",
+    "UNH":   "UnitedHealth",
+    "XOM":   "ExxonMobil",
+    "WMT":   "Walmart",
+    "PG":    "Procter & Gamble",
+}
+
+ALL_POPULAR = {**IDX_POPULAR, **US_POPULAR}
+
+# ══════════════════════════════════════════════════════════════════════
+# TICKER SEARCH (Yahoo Finance API)
+# ══════════════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner=False, ttl=300)
+def search_tickers(query: str):
+    """Cari ticker via Yahoo Finance search API. Return list of (symbol, name, type)."""
+    if not query or len(query.strip()) < 2:
+        return []
+    try:
+        q = urllib.parse.quote(query.strip())
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=10&newsCount=0&listsCount=0"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = _json.loads(r.read())
+        results = []
+        for item in data.get("quotes", []):
+            sym  = item.get("symbol", "")
+            name = item.get("longname") or item.get("shortname") or sym
+            qtype = item.get("quoteType", "")
+            if sym and qtype in ("EQUITY", "ETF", "MUTUALFUND"):
+                results.append((sym, name, qtype))
+        return results
+    except Exception:
+        return []
+
+import urllib.parse
+
+# ══════════════════════════════════════════════════════════════════════
+# WIDGET PEMILIH TICKER (reusable di semua model)
+# ══════════════════════════════════════════════════════════════════════
+
+def ticker_selector(key_prefix: str, default_tickers: str) -> str:
+    """
+    Widget sidebar untuk memilih ticker:
+    - Tab 1: pilih dari daftar populer (IDX + US)
+    - Tab 2: cari via Yahoo Finance
+    Mengembalikan string ticker dipisahkan koma.
+    """
+    # State untuk ticker yang sudah dipilih
+    sel_key = f"{key_prefix}_selected_tickers"
+    if sel_key not in st.session_state:
+        st.session_state[sel_key] = [t.strip() for t in default_tickers.split(",") if t.strip()]
+
+    selected = st.session_state[sel_key]
+
+    # ── Tab pilih / cari ──
+    tab_pop, tab_search = st.tabs(["Saham Populer", "Cari Saham"])
+
+    with tab_pop:
+        st.caption("Centang saham yang ingin dimasukkan:")
+        col1, col2 = st.columns(2)
+        # Indonesia
+        col1.markdown("**Indonesia (IDX)**")
+        for ticker, name in IDX_POPULAR.items():
+            checked = ticker in selected
+            if col1.checkbox(f"{ticker}", value=checked,
+                             key=f"{key_prefix}_pop_{ticker}",
+                             help=name):
+                if ticker not in selected:
+                    selected.append(ticker)
+            else:
+                if ticker in selected:
+                    selected.remove(ticker)
+        # US
+        col2.markdown("**US Stocks**")
+        for ticker, name in US_POPULAR.items():
+            checked = ticker in selected
+            if col2.checkbox(f"{ticker}", value=checked,
+                             key=f"{key_prefix}_pop_{ticker}",
+                             help=name):
+                if ticker not in selected:
+                    selected.append(ticker)
+            else:
+                if ticker in selected:
+                    selected.remove(ticker)
+
+    with tab_search:
+        search_q = st.text_input("Nama perusahaan / ticker",
+                                 key=f"{key_prefix}_search_q",
+                                 placeholder="cth: Bank BCA, Tesla, BBCA...")
+        if st.button("Cari", key=f"{key_prefix}_search_btn", use_container_width=True):
+            st.session_state[f"{key_prefix}_search_results"] = search_tickers(search_q)
+
+        results = st.session_state.get(f"{key_prefix}_search_results", [])
+        if results:
+            st.caption(f"{len(results)} hasil ditemukan:")
+            for sym, name, qtype in results:
+                already = sym in selected
+                label = f"**{sym}** — {name} _{qtype}_"
+                if st.checkbox(label, value=already, key=f"{key_prefix}_sr_{sym}"):
+                    if sym not in selected:
+                        selected.append(sym)
+                else:
+                    if sym in selected:
+                        selected.remove(sym)
+        elif f"{key_prefix}_search_results" in st.session_state:
+            st.warning("Tidak ada hasil. Coba kata kunci lain.")
+
+    st.session_state[sel_key] = selected
+
+    # ── Ringkasan yang dipilih ──
+    if selected:
+        st.markdown(f"**Terpilih ({len(selected)}):** `{', '.join(selected)}`")
+    else:
+        st.warning("Belum ada saham dipilih.")
+
+    return ", ".join(selected)
 
 # ══════════════════════════════════════════════════════════════════════
 # SHARED HELPERS
@@ -682,32 +846,12 @@ elif mode.startswith("Strategic"):
         if not YFINANCE_AVAILABLE:
             st.error("yfinance belum terinstall. Jalankan: `pip install yfinance`")
         else:
-            st.caption("Masukkan ticker saham dan periode data.")
-            tickers_input = st.text_input(
-                "Ticker Saham (pisahkan koma)",
-                value="BBCA.JK, BBRI.JK, TLKM.JK",
-                help="Ticker Yahoo Finance. Indonesia: suffix .JK (BBCA.JK). US: AAPL, MSFT",
-            )
-            period_label = st.selectbox(
-                "Periode Data",
-                options=list(PERIOD_OPTIONS.keys()),
-                index=2,
-            )
-            freq_sel = st.selectbox(
-                "Frekuensi Data",
-                options=list(FREQ_OPTIONS.keys()),
-                key="global_freq",
-                help="Mingguan = sesuai AIMMS Ch.18 (~52 titik/tahun)",
-            )
+            tickers_input = ticker_selector("s", "BBCA.JK, BBRI.JK, TLKM.JK")
+            st.divider()
+            period_label = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2)
+            st.selectbox("Frekuensi Data", options=list(FREQ_OPTIONS.keys()), key="global_freq",
+                         help="Mingguan = sesuai AIMMS Ch.18")
             fetch_btn = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary")
-
-        st.divider()
-        st.markdown(
-            "**Contoh ticker:**\n"
-            "- Indonesia: `BBCA.JK, BMRI.JK, TLKM.JK`\n"
-            "- US: `AAPL, MSFT, GOOGL`\n"
-            "- Campuran: `BBCA.JK, AAPL`"
-        )
 
     if not YFINANCE_AVAILABLE:
         st.error("yfinance tidak tersedia. Install dengan: `pip install yfinance`")
@@ -904,23 +1048,12 @@ elif mode.startswith("Tactical"):
 
     with st.sidebar:
         st.header("Input — Tactical")
-        st.caption("Masukkan ticker saham dan periode data.")
-        tickers_input_t = st.text_input(
-            "Ticker Saham (pisahkan koma)",
-            value="BBCA.JK, BBRI.JK, TLKM.JK, ASII.JK, BMRI.JK",
-            key="t_tickers_input",
-            help="Ticker Yahoo Finance. Indonesia: suffix .JK. US: AAPL, MSFT",
-        )
+        tickers_input_t = ticker_selector("t", "BBCA.JK, BBRI.JK, TLKM.JK, ASII.JK, BMRI.JK")
+        st.divider()
         period_label_t = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2, key="t_period")
         st.selectbox("Frekuensi Data", options=list(FREQ_OPTIONS.keys()), key="global_freq",
                      help="Mingguan = sesuai AIMMS Ch.18 (~52 titik/tahun)")
         fetch_btn_t = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary", key="t_fetch")
-        st.divider()
-        st.markdown(
-            "**Contoh ticker:**\n"
-            "- Indonesia: `BBCA.JK, BMRI.JK`\n"
-            "- US: `AAPL, MSFT, GOOGL`"
-        )
 
     if fetch_btn_t or st.session_state.t_assets is None:
         with st.spinner(f"Mengambil data {freq_key} dari Yahoo Finance..."):
@@ -1085,23 +1218,12 @@ elif mode.startswith("Downside"):
 
     with st.sidebar:
         st.header("Input — Downside Variance")
-        st.caption("Masukkan ticker saham dan periode data.")
-        tickers_input_d = st.text_input(
-            "Ticker Saham (pisahkan koma)",
-            value="BBCA.JK, BBRI.JK, TLKM.JK, ASII.JK, BMRI.JK",
-            key="d_tickers_input",
-            help="Ticker Yahoo Finance. Indonesia: suffix .JK. US: AAPL, MSFT",
-        )
+        tickers_input_d = ticker_selector("d", "BBCA.JK, BBRI.JK, TLKM.JK, ASII.JK, BMRI.JK")
+        st.divider()
         period_label_d = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2, key="d_period")
         st.selectbox("Frekuensi Data", options=list(FREQ_OPTIONS.keys()), key="global_freq",
                      help="Mingguan = sesuai AIMMS Ch.18 (~52 titik/tahun)")
         fetch_btn_d = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary", key="d_fetch")
-        st.divider()
-        st.markdown(
-            "**Contoh ticker:**\n"
-            "- Indonesia: `BBCA.JK, BMRI.JK`\n"
-            "- US: `AAPL, MSFT, GOOGL`"
-        )
         st.divider()
         st.info("**Downside Variance** hanya meminimalkan deviasi di bawah target M, bukan total variance.")
 
@@ -1271,13 +1393,8 @@ else:  # Piecewise
 
     with st.sidebar:
         st.header("Input — Piecewise Linear")
-        st.caption("Masukkan ticker saham dan periode data.")
-        tickers_input_p = st.text_input(
-            "Ticker Saham (pisahkan koma)",
-            value="BBCA.JK, BBRI.JK, TLKM.JK, ASII.JK, BMRI.JK",
-            key="p_tickers_input",
-            help="Ticker Yahoo Finance. Indonesia: suffix .JK. US: AAPL, MSFT",
-        )
+        tickers_input_p = ticker_selector("p", "BBCA.JK, BBRI.JK, TLKM.JK, ASII.JK, BMRI.JK")
+        st.divider()
         period_label_p = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2, key="p_period")
         st.selectbox("Frekuensi Data", options=list(FREQ_OPTIONS.keys()), key="global_freq",
                      help="Mingguan = sesuai AIMMS Ch.18 (~52 titik/tahun)")
