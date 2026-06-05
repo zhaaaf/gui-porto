@@ -522,24 +522,14 @@ with st.sidebar:
             st.session_state["page"] = page_name
             st.rerun()
     st.divider()
-    st.markdown("**Frekuensi Data**")
-    freq_key = st.selectbox(
-        "Frekuensi resampling",
-        options=list(FREQ_OPTIONS.keys()),
-        index=0,
-        key="global_freq",
-        label_visibility="collapsed",
-        help="Mingguan sesuai data AIMMS Ch.18 (~51 periode/tahun). Bulanan lebih stabil. Harian lebih noise.",
-    )
-    freq_label = FREQ_OPTIONS[freq_key]["label"]
-    st.caption({
-        "Mingguan (sesuai AIMMS)": "Sesuai buku AIMMS Ch.18 — ~52 titik/tahun",
-        "Bulanan":                  "Return ~1-3%/bulan — umum di literatur",
-        "Harian":                   "Noise tinggi — cocok trader aktif",
-    }[freq_key])
-    st.divider()
 
 mode = st.session_state["page"]
+
+# freq_key dibaca dari session_state agar persisten lintas halaman
+if "global_freq" not in st.session_state:
+    st.session_state["global_freq"] = "Mingguan (sesuai AIMMS)"
+freq_key   = st.session_state["global_freq"]
+freq_label = FREQ_OPTIONS[freq_key]["label"]
 
 # ══════════════════════════════════════════════════════════════════════
 # HEADER UTAMA
@@ -701,7 +691,13 @@ elif mode.startswith("Strategic"):
             period_label = st.selectbox(
                 "Periode Data",
                 options=list(PERIOD_OPTIONS.keys()),
-                index=2,  # default 2 tahun
+                index=2,
+            )
+            freq_sel = st.selectbox(
+                "Frekuensi Data",
+                options=list(FREQ_OPTIONS.keys()),
+                key="global_freq",
+                help="Mingguan = sesuai AIMMS Ch.18 (~52 titik/tahun)",
             )
             fetch_btn = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary")
 
@@ -916,6 +912,8 @@ elif mode.startswith("Tactical"):
             help="Ticker Yahoo Finance. Indonesia: suffix .JK. US: AAPL, MSFT",
         )
         period_label_t = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2, key="t_period")
+        st.selectbox("Frekuensi Data", options=list(FREQ_OPTIONS.keys()), key="global_freq",
+                     help="Mingguan = sesuai AIMMS Ch.18 (~52 titik/tahun)")
         fetch_btn_t = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary", key="t_fetch")
         st.divider()
         st.markdown(
@@ -925,7 +923,7 @@ elif mode.startswith("Tactical"):
         )
 
     if fetch_btn_t or st.session_state.t_assets is None:
-        with st.spinner("Mengambil data bulanan dari Yahoo Finance..."):
+        with st.spinner(f"Mengambil data {freq_key} dari Yahoo Finance..."):
             tickers_t, prices_t_arr, err_t = fetch_prices(tickers_input_t, PERIOD_OPTIONS[period_label_t], freq_key)
         if err_t:
             st.session_state.t_error = f"❌ {err_t}"
@@ -1095,6 +1093,8 @@ elif mode.startswith("Downside"):
             help="Ticker Yahoo Finance. Indonesia: suffix .JK. US: AAPL, MSFT",
         )
         period_label_d = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2, key="d_period")
+        st.selectbox("Frekuensi Data", options=list(FREQ_OPTIONS.keys()), key="global_freq",
+                     help="Mingguan = sesuai AIMMS Ch.18 (~52 titik/tahun)")
         fetch_btn_d = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary", key="d_fetch")
         st.divider()
         st.markdown(
@@ -1106,7 +1106,7 @@ elif mode.startswith("Downside"):
         st.info("**Downside Variance** hanya meminimalkan deviasi di bawah target M, bukan total variance.")
 
     if fetch_btn_d or st.session_state.d_assets is None:
-        with st.spinner("Mengambil data bulanan dari Yahoo Finance..."):
+        with st.spinner(f"Mengambil data {freq_key} dari Yahoo Finance..."):
             tickers_d, prices_d_arr, err_d = fetch_prices(tickers_input_d, PERIOD_OPTIONS[period_label_d], freq_key)
         if err_d:
             st.session_state.d_error = f"❌ {err_d}"
@@ -1279,6 +1279,8 @@ else:  # Piecewise
             help="Ticker Yahoo Finance. Indonesia: suffix .JK. US: AAPL, MSFT",
         )
         period_label_p = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2, key="p_period")
+        st.selectbox("Frekuensi Data", options=list(FREQ_OPTIONS.keys()), key="global_freq",
+                     help="Mingguan = sesuai AIMMS Ch.18 (~52 titik/tahun)")
         fetch_btn_p = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary", key="p_fetch")
         st.divider()
         st.markdown("**Parameter Optimasi:**")
@@ -1301,7 +1303,7 @@ else:  # Piecewise
         )
 
     if fetch_btn_p or st.session_state.p_assets is None:
-        with st.spinner("Mengambil data bulanan dari Yahoo Finance..."):
+        with st.spinner(f"Mengambil data {freq_key} dari Yahoo Finance..."):
             tickers_p, prices_p_arr, err_p = fetch_prices(tickers_input_p, PERIOD_OPTIONS[period_label_p], freq_key)
         if err_p:
             st.session_state.p_error = f"❌ {err_p}"
