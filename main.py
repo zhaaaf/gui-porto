@@ -303,7 +303,8 @@ def dynamic_segments(q_previous, epsilon):
 def solve_piecewise_portfolio(
         return_matrix, asset_names,
         target_return=0.20, min_fraction=0.05,
-        epsilon=0.10, segments=10, use_dynamic=True):
+        epsilon=0.10, segments=10, use_dynamic=True,
+        logic_asset1=None, logic_asset2=None):
 
     mu = calculate_expected_returns(return_matrix)
     T, n = return_matrix.shape[0], len(asset_names)
@@ -348,10 +349,12 @@ def solve_piecewise_portfolio(
         model += (lpSum(return_matrix[t, i] * x[asset_names[i]] for i in range(n))
                   + q[t] >= target_return)
 
-    # Logical constraint: IF RD > 20% THEN KLM < 30%
+    # Logical constraint: IF asset1 > 20% THEN asset2 < 30%
+    a1 = logic_asset1 if logic_asset1 and logic_asset1 in asset_names else asset_names[0]
+    a2 = logic_asset2 if logic_asset2 and logic_asset2 in asset_names else asset_names[1]
     BIG_M = 1
-    model += x["RD"] - 0.20 <= BIG_M * trigger_RD
-    model += x["KLM"] <= 0.30 + BIG_M * (1 - trigger_RD)
+    model += x[a1] - 0.20 <= BIG_M * trigger_RD
+    model += x[a2] <= 0.30 + BIG_M * (1 - trigger_RD)
 
     model.solve(PULP_CBC_CMD(msg=False))
 
@@ -792,36 +795,52 @@ elif mode.startswith("Tactical"):
 
     with st.sidebar:
         st.header("Input — Tactical")
-        st.caption("Masukkan nama aset dan data harga historis.")
-        assets_input = st.text_input("Nama Aset (pisahkan koma)", value=DEFAULT_ASSETS)
-        prices_input = st.text_area(
-            "Data Harga Historis (baris = periode, kolom = aset)",
-            value=DEFAULT_PRICES, height=320,
-            help="Setiap baris adalah satu periode; nilai dipisahkan koma",
+        st.caption("Masukkan ticker saham dan periode data.")
+        tickers_input_t = st.text_input(
+            "Ticker Saham (pisahkan koma)",
+            value="BBCA.JK, BBRI.JK, TLKM.JK, ASII.JK, BMRI.JK",
+            key="t_tickers_input",
+            help="Ticker Yahoo Finance. Indonesia: suffix .JK. US: AAPL, MSFT",
         )
-        apply_btn_t = st.button("Terapkan Data Baru", use_container_width=True, type="primary")
+        period_label_t = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2, key="t_period")
+        fetch_btn_t = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary", key="t_fetch")
         st.divider()
-        st.markdown("**Format:**\n- Aset: `RD,AKZ,KLM`\n- Harga: satu baris per periode, nilai koma")
+        st.markdown(
+            "**Contoh ticker:**\n"
+            "- Indonesia: `BBCA.JK, BMRI.JK`\n"
+            "- US: `AAPL, MSFT, GOOGL`"
+        )
 
-    if apply_btn_t or st.session_state.t_assets is None:
-        try:
-            assets, prices = parse_price_inputs(assets_input, prices_input)
-            n_a = len(assets)
-            if prices.shape[1] != n_a:
-                st.session_state.t_error = f"❌ Kolom harga ({prices.shape[1]}) ≠ jumlah aset ({n_a})."
-            elif prices.shape[0] < 2:
-                st.session_state.t_error = "❌ Data harga minimal 2 baris."
-            else:
-                st.session_state.t_assets = assets
-                st.session_state.t_prices = prices
+    if fetch_btn_t or st.session_state.t_assets is None:
+        with st.spinner("Mengambil data dari Yahoo Finance..."):
+            tickers_t, _, _, err_t = fetch_yfinance(tickers_input_t, PERIOD_OPTIONS[period_label_t])
+        if err_t:
+            st.session_state.t_error = f"❌ {err_t}"
+        else:
+            # Fetch close prices for use as price matrix
+            try:
+                import yfinance as yf
+                raw_t = yf.download(
+                    [t.strip().upper() for t in tickers_input_t.split(",") if t.strip()],
+                    period=PERIOD_OPTIONS[period_label_t], auto_adjust=True, progress=False
+                )
+                close_t = (raw_t["Close"] if len(tickers_t) > 1 else raw_t[["Close"]].rename(columns={"Close": tickers_t[0]}))
+                close_t = close_t[tickers_t].dropna()
+                st.session_state.t_assets = tickers_t
+                st.session_state.t_prices = close_t.values
                 st.session_state.t_error  = None
-                if apply_btn_t:
-                    st.toast("Data berhasil diperbarui!", icon="✅")
-        except Exception as e:
-            st.session_state.t_error = f"❌ Kesalahan membaca data: {e}"
+                if fetch_btn_t:
+                    st.toast(f"Data berhasil diambil: {', '.join(tickers_t)}", icon="✅")
+            except Exception as e:
+                st.session_state.t_error = f"❌ Error memproses data: {e}"
 
     if st.session_state.t_error:
         st.error(st.session_state.t_error)
+        st.info("Pastikan nama ticker benar dan koneksi internet tersedia.")
+        st.stop()
+
+    if st.session_state.t_assets is None:
+        st.info("Klik **Ambil Data dari Yahoo Finance** di sidebar untuk memulai.")
         st.stop()
 
     assets = st.session_state.t_assets
@@ -964,38 +983,53 @@ elif mode.startswith("Downside"):
 
     with st.sidebar:
         st.header("Input — Downside Variance")
-        st.caption("Masukkan nama aset dan data harga historis.")
-        assets_input_d = st.text_input("Nama Aset (pisahkan koma)", value=DEFAULT_ASSETS, key="d_assets_input")
-        prices_input_d = st.text_area(
-            "Data Harga Historis (baris = periode, kolom = aset)",
-            value=DEFAULT_PRICES, height=320, key="d_prices_input",
-            help="Setiap baris adalah satu periode; nilai dipisahkan koma",
+        st.caption("Masukkan ticker saham dan periode data.")
+        tickers_input_d = st.text_input(
+            "Ticker Saham (pisahkan koma)",
+            value="BBCA.JK, BBRI.JK, TLKM.JK, ASII.JK, BMRI.JK",
+            key="d_tickers_input",
+            help="Ticker Yahoo Finance. Indonesia: suffix .JK. US: AAPL, MSFT",
         )
-        apply_btn_d = st.button("Terapkan Data Baru", use_container_width=True, type="primary", key="d_apply")
+        period_label_d = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2, key="d_period")
+        fetch_btn_d = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary", key="d_fetch")
         st.divider()
-        st.markdown("**Format:**\n- Aset: `RD,AKZ,KLM`\n- Harga: satu baris per periode, nilai koma")
+        st.markdown(
+            "**Contoh ticker:**\n"
+            "- Indonesia: `BBCA.JK, BMRI.JK`\n"
+            "- US: `AAPL, MSFT, GOOGL`"
+        )
         st.divider()
         st.info("**Downside Variance** hanya meminimalkan deviasi di bawah target M, bukan total variance.")
 
-    if apply_btn_d or st.session_state.d_assets is None:
-        try:
-            assets_d, prices_d = parse_price_inputs(assets_input_d, prices_input_d)
-            n_d = len(assets_d)
-            if prices_d.shape[1] != n_d:
-                st.session_state.d_error = f"❌ Kolom harga ({prices_d.shape[1]}) ≠ jumlah aset ({n_d})."
-            elif prices_d.shape[0] < 2:
-                st.session_state.d_error = "❌ Data harga minimal 2 baris."
-            else:
-                st.session_state.d_assets = assets_d
-                st.session_state.d_prices = prices_d
+    if fetch_btn_d or st.session_state.d_assets is None:
+        with st.spinner("Mengambil data dari Yahoo Finance..."):
+            tickers_d, _, _, err_d = fetch_yfinance(tickers_input_d, PERIOD_OPTIONS[period_label_d])
+        if err_d:
+            st.session_state.d_error = f"❌ {err_d}"
+        else:
+            try:
+                import yfinance as yf
+                raw_d = yf.download(
+                    [t.strip().upper() for t in tickers_input_d.split(",") if t.strip()],
+                    period=PERIOD_OPTIONS[period_label_d], auto_adjust=True, progress=False
+                )
+                close_d = (raw_d["Close"] if len(tickers_d) > 1 else raw_d[["Close"]].rename(columns={"Close": tickers_d[0]}))
+                close_d = close_d[tickers_d].dropna()
+                st.session_state.d_assets = tickers_d
+                st.session_state.d_prices = close_d.values
                 st.session_state.d_error  = None
-                if apply_btn_d:
-                    st.toast("Data berhasil diperbarui!", icon="✅")
-        except Exception as e:
-            st.session_state.d_error = f"❌ Kesalahan membaca data: {e}"
+                if fetch_btn_d:
+                    st.toast(f"Data berhasil diambil: {', '.join(tickers_d)}", icon="✅")
+            except Exception as e:
+                st.session_state.d_error = f"❌ Error memproses data: {e}"
 
     if st.session_state.d_error:
         st.error(st.session_state.d_error)
+        st.info("Pastikan nama ticker benar dan koneksi internet tersedia.")
+        st.stop()
+
+    if st.session_state.d_assets is None:
+        st.info("Klik **Ambil Data dari Yahoo Finance** di sidebar untuk memulai.")
         st.stop()
 
     assets_d  = st.session_state.d_assets
@@ -1141,14 +1175,15 @@ else:  # Piecewise
 
     with st.sidebar:
         st.header("Input — Piecewise Linear")
-        st.caption("Atur parameter MILP dan data harga.")
-        assets_input_p = st.text_input("Nama Aset (pisahkan koma)", value=DEFAULT_ASSETS, key="p_assets_input")
-        prices_input_p = st.text_area(
-            "Data Harga Historis",
-            value=DEFAULT_PRICES, height=220, key="p_prices_input",
-            help="Satu baris per periode; nilai dipisahkan koma",
+        st.caption("Masukkan ticker saham dan periode data.")
+        tickers_input_p = st.text_input(
+            "Ticker Saham (pisahkan koma)",
+            value="BBCA.JK, BBRI.JK, TLKM.JK, ASII.JK, BMRI.JK",
+            key="p_tickers_input",
+            help="Ticker Yahoo Finance. Indonesia: suffix .JK. US: AAPL, MSFT",
         )
-        apply_btn_p = st.button("Terapkan Data Baru", use_container_width=True, type="primary", key="p_apply")
+        period_label_p = st.selectbox("Periode Data", options=list(PERIOD_OPTIONS.keys()), index=2, key="p_period")
+        fetch_btn_p = st.button("Ambil Data dari Yahoo Finance", use_container_width=True, type="primary", key="p_fetch")
         st.divider()
         st.markdown("**Parameter Optimasi:**")
         p_target   = st.slider("Target Return (M)",     0.00, 0.55, 0.20, 0.01, key="p_target",
@@ -1162,32 +1197,45 @@ else:  # Piecewise
         p_dynamic  = st.checkbox("Dynamic Interval", value=True, key="p_dynamic",
                                   help="Hitung K otomatis: ceil(q_max / 2√ε)")
         st.divider()
+        st.divider()
         st.markdown(
-            "**Logical Constraint (hardcoded):**\n\n"
-            "Jika alokasi **RD > 20%**, maka alokasi **KLM < 30%**"
+            "**Catatan Piecewise:**\n\n"
+            "Logical constraint pada model ini menggunakan **2 aset pertama** dari daftar ticker\n\n"
+            "Jika aset ke-1 > 20%, maka aset ke-2 < 30%"
         )
 
-    if apply_btn_p or st.session_state.p_assets is None:
-        try:
-            assets_p, prices_p = parse_price_inputs(assets_input_p, prices_input_p)
-            n_p = len(assets_p)
-            if prices_p.shape[1] != n_p:
-                st.session_state.p_error = f"❌ Kolom harga ({prices_p.shape[1]}) ≠ jumlah aset ({n_p})."
-            elif "RD" not in assets_p or "KLM" not in assets_p:
-                st.session_state.p_error = "❌ Nama aset harus mengandung 'RD' dan 'KLM' (logical constraint)."
-            elif prices_p.shape[0] < 2:
-                st.session_state.p_error = "❌ Data harga minimal 2 baris."
-            else:
-                st.session_state.p_assets = assets_p
-                st.session_state.p_prices = prices_p
+    if fetch_btn_p or st.session_state.p_assets is None:
+        with st.spinner("Mengambil data dari Yahoo Finance..."):
+            tickers_p_list = [t.strip().upper() for t in tickers_input_p.split(",") if t.strip()]
+            tickers_p, _, _, err_p = fetch_yfinance(tickers_input_p, PERIOD_OPTIONS[period_label_p])
+        if err_p:
+            st.session_state.p_error = f"❌ {err_p}"
+        elif len(tickers_p) < 2:
+            st.session_state.p_error = "❌ Minimal 2 ticker untuk model Piecewise."
+        else:
+            try:
+                import yfinance as yf
+                raw_p = yf.download(
+                    tickers_p_list, period=PERIOD_OPTIONS[period_label_p],
+                    auto_adjust=True, progress=False
+                )
+                close_p = (raw_p["Close"] if len(tickers_p) > 1 else raw_p[["Close"]].rename(columns={"Close": tickers_p[0]}))
+                close_p = close_p[tickers_p].dropna()
+                st.session_state.p_assets = tickers_p
+                st.session_state.p_prices = close_p.values
                 st.session_state.p_error  = None
-                if apply_btn_p:
-                    st.toast("Data berhasil diperbarui!", icon="✅")
-        except Exception as e:
-            st.session_state.p_error = f"❌ Kesalahan membaca data: {e}"
+                if fetch_btn_p:
+                    st.toast(f"Data berhasil diambil: {', '.join(tickers_p)}", icon="✅")
+            except Exception as e:
+                st.session_state.p_error = f"❌ Error memproses data: {e}"
 
     if st.session_state.p_error:
         st.error(st.session_state.p_error)
+        st.info("Pastikan nama ticker benar dan koneksi internet tersedia.")
+        st.stop()
+
+    if st.session_state.p_assets is None:
+        st.info("Klik **Ambil Data dari Yahoo Finance** di sidebar untuk memulai.")
         st.stop()
 
     assets_p  = st.session_state.p_assets
@@ -1195,6 +1243,9 @@ else:  # Piecewise
     returns_p = calculate_returns(prices_p)
     p_minfrac_val = p_minfrac / 100.0
     st.divider()
+
+    logic_a1 = assets_p[0]
+    logic_a2 = assets_p[1]
 
     with st.spinner("Menyelesaikan MILP... (mungkin 5–15 detik)"):
         result_p = solve_piecewise_portfolio(
@@ -1205,6 +1256,8 @@ else:  # Piecewise
             epsilon=p_epsilon,
             segments=p_segments,
             use_dynamic=p_dynamic,
+            logic_asset1=logic_a1,
+            logic_asset2=logic_a2,
         )
 
     # STATUS
@@ -1232,16 +1285,16 @@ else:  # Piecewise
         st.dataframe(alloc_df, use_container_width=True, hide_index=True)
 
         # Logical constraint check
-        rd_alloc  = result_p["allocation"].get("RD", 0) or 0
-        klm_alloc = result_p["allocation"].get("KLM", 0) or 0
-        st.markdown("#### Cek Logical Constraint (RD > 20% → KLM < 30%)")
-        if rd_alloc > 0.20:
-            if klm_alloc < 0.30:
-                st.success(f"RD = {rd_alloc*100:.1f}% > 20% dan KLM = {klm_alloc*100:.1f}% < 30% — Constraint terpenuhi")
+        a1_alloc = result_p["allocation"].get(logic_a1, 0) or 0
+        a2_alloc = result_p["allocation"].get(logic_a2, 0) or 0
+        st.markdown(f"#### Cek Logical Constraint ({logic_a1} > 20% → {logic_a2} < 30%)")
+        if a1_alloc > 0.20:
+            if a2_alloc < 0.30:
+                st.success(f"{logic_a1} = {a1_alloc*100:.1f}% > 20% dan {logic_a2} = {a2_alloc*100:.1f}% < 30% — Constraint terpenuhi")
             else:
-                st.error(f"RD = {rd_alloc*100:.1f}% > 20% tetapi KLM = {klm_alloc*100:.1f}% >= 30% — Dilanggar!")
+                st.error(f"{logic_a1} = {a1_alloc*100:.1f}% > 20% tetapi {logic_a2} = {a2_alloc*100:.1f}% >= 30% — Dilanggar!")
         else:
-            st.info(f"RD = {rd_alloc*100:.1f}% <= 20% — Logical constraint tidak aktif")
+            st.info(f"{logic_a1} = {a1_alloc*100:.1f}% <= 20% — Logical constraint tidak aktif")
 
         st.markdown("#### Dynamic Interval Report")
         st.markdown(
