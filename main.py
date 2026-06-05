@@ -399,59 +399,62 @@ def solve_piecewise_portfolio(
     }
 
 # ══════════════════════════════════════════════════════════════════════
-# PIECEWISE LINEAR ILLUSTRATION CHART (like Figure 18.6)
+# PIECEWISE LINEAR ILLUSTRATION CHART (Figure 18.6 style)
 # ══════════════════════════════════════════════════════════════════════
 
-def plot_piecewise_illustration(breaks, slopes, qmax, n_breakpoints_show=None):
-    """Plot piecewise linear vs quadratic, matching Figure 18.6 style."""
-    x_arr = np.linspace(0, qmax, 400)
+def _pw_value(q, breaks, slopes):
+    """Evaluate piecewise linear function at a single point q."""
+    v = 0.0
+    for i in range(len(slopes)):
+        used = min(max(q - breaks[i], 0.0), breaks[i + 1] - breaks[i])
+        v += slopes[i] * used
+    return v
 
-    # Compute piecewise values
-    pw_vals = []
-    for xx in x_arr:
-        vpw = 0.0
-        for i in range(len(slopes)):
-            left, right = breaks[i], breaks[i + 1]
-            used = min(max(xx - left, 0.0), right - left)
-            vpw += slopes[i] * used
-        pw_vals.append(vpw)
+def plot_piecewise_illustration(qmax):
+    """
+    Plot Figure 18.6-style: kuadratik q² vs aproksimasi piecewise linear.
+    Selalu gunakan 3 segmen agar visual jelas (seperti Figure 18.6),
+    terlepas dari jumlah segmen aktual yang digunakan di optimisasi.
+    """
+    N_ILLUSTRATE = 3  # jumlah segmen untuk ilustrasi — persis seperti Figure 18.6
+    breaks_ill, slopes_ill, _, _ = build_piecewise(qmax, N_ILLUSTRATE)
 
-    fig, ax = plt.subplots(figsize=(6, 4.5))
-    ax.plot(x_arr, x_arr ** 2, color="black", linewidth=2.0, label="Kuadratik $q^2$")
-    ax.plot(x_arr, pw_vals, color="black", linewidth=1.5, linestyle="--",
+    x_dense = np.linspace(0, qmax, 400)
+    quad_vals = x_dense ** 2
+    pw_vals   = np.array([_pw_value(xx, breaks_ill, slopes_ill) for xx in x_dense])
+
+    fig, ax = plt.subplots(figsize=(5.5, 4.5))
+
+    # Garis kuadratik dan piecewise
+    ax.plot(x_dense, quad_vals, color="black", linewidth=2.2, label="Kuadratik $q^2$")
+    ax.plot(x_dense, pw_vals,   color="black", linewidth=1.4, linestyle="-",
             label="Aproksimasi Piecewise Linear")
 
-    # Draw tick marks (I-bars) at interior breakpoints to show error
-    interior = breaks[1:-1]
-    if n_breakpoints_show is not None:
-        step = max(1, len(interior) // n_breakpoints_show)
-        interior = interior[::step][:n_breakpoints_show]
-
-    for bp in interior:
-        # Compute piecewise value at breakpoint
-        vpw_bp = 0.0
-        for i in range(len(slopes)):
-            left, right = breaks[i], breaks[i + 1]
-            used = min(max(bp - left, 0.0), right - left)
-            vpw_bp += slopes[i] * used
+    # I-bar error di setiap breakpoint interior (persis Figure 18.6)
+    tick_w = qmax * 0.03
+    for bp in breaks_ill[1:-1]:
+        pw_bp   = _pw_value(bp, breaks_ill, slopes_ill)
         quad_bp = bp ** 2
-        mid_y = (vpw_bp + quad_bp) / 2.0
-        half_err = abs(vpw_bp - quad_bp) / 2.0
-        tick_width = qmax * 0.025
-        # Vertical bar
-        ax.plot([bp, bp], [mid_y - half_err, mid_y + half_err], color="black", linewidth=1.5)
-        # Top tick
-        ax.plot([bp - tick_width, bp + tick_width], [mid_y + half_err, mid_y + half_err],
-                color="black", linewidth=1.5)
-        # Bottom tick
-        ax.plot([bp - tick_width, bp + tick_width], [mid_y - half_err, mid_y - half_err],
-                color="black", linewidth=1.5)
+        # Titik perpotongan piecewise berada di ATAS kuadratik di tengah segmen
+        # → tampilkan I-bar antara keduanya
+        y_lo = min(pw_bp, quad_bp)
+        y_hi = max(pw_bp, quad_bp)
+        if (y_hi - y_lo) < 1e-9:
+            continue
+        ax.plot([bp, bp],                    [y_lo, y_hi], color="black", linewidth=1.6)
+        ax.plot([bp - tick_w, bp + tick_w],  [y_hi, y_hi], color="black", linewidth=1.6)
+        ax.plot([bp - tick_w, bp + tick_w],  [y_lo, y_lo], color="black", linewidth=1.6)
+
+    # Garis putus-putus vertikal di breakpoints (seperti Figure 18.6)
+    for bp in breaks_ill[1:-1]:
+        ax.axvline(bp, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax.axvline(qmax, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
 
     ax.set_xlabel("q", fontsize=11)
-    ax.set_ylabel("Risiko", fontsize=11)
-    ax.set_title("Piecewise Linear vs Kuadratik", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Nilai Aproksimasi", fontsize=11)
+    ax.set_title("Piecewise Linear vs Kuadratik\n(Ilustrasi 3 Segmen)", fontsize=11, fontweight="bold")
     ax.legend(fontsize=9, loc="upper left")
-    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.set_xlim(left=0); ax.set_ylim(bottom=0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
@@ -473,16 +476,15 @@ for k, v in {
 # HEADER UTAMA
 # ══════════════════════════════════════════════════════════════════════
 st.title("Portfolio Optimization Suite")
-st.markdown("**Mean-Variance, Downside Risk & Piecewise Linear Optimization (SLSQP / MILP)** — AIMMS Chapter 18")
 
 mode = st.radio(
-    "Pilih Model Optimasi:",
+    "Navigasi:",
     options=[
+        "Dashboard",
         "Strategic Asset Allocation",
         "Tactical Asset Allocation",
         "Downside Variance Optimization",
         "Piecewise Linear (MILP)",
-        "Panduan Penggunaan",
     ],
     horizontal=True,
 )
@@ -490,103 +492,164 @@ st.divider()
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PANDUAN PENGGUNAAN
+# DASHBOARD
 # ══════════════════════════════════════════════════════════════════════
-if mode == "Panduan Penggunaan":
+if mode == "Dashboard":
 
-    st.header("Panduan Penggunaan Aplikasi")
+    # ── Hero section ──
     st.markdown("""
-Aplikasi ini mengimplementasikan **4 model optimasi portofolio** berdasarkan AIMMS Chapter 18.
-Pilih tab model di atas untuk mulai, atau baca panduan di bawah ini terlebih dahulu.
+## Selamat Datang di Portfolio Optimization Suite
+
+Aplikasi ini mengimplementasikan **4 model optimasi portofolio** berbasis riset operasi
+dari **AIMMS Chapter 18: Portfolio Selection**. Data saham diambil secara otomatis dari
+**Yahoo Finance** — tidak perlu input manual.
     """)
 
-    with st.expander("Strategic Asset Allocation", expanded=True):
+    col_hero1, col_hero2, col_hero3 = st.columns(3)
+    col_hero1.info("**Data real-time**\nHarga saham dari Yahoo Finance, diresample ke return bulanan")
+    col_hero2.info("**4 Model Optimasi**\nStrategic, Tactical, Downside Variance, Piecewise Linear")
+    col_hero3.info("**Solver**\nSLSQP (continuous) + CBC (MILP) via PuLP")
+
+    st.divider()
+
+    # ── Tujuan & landasan ──
+    st.markdown("## Tujuan & Landasan Model")
+    st.markdown("""
+Optimasi portofolio bertujuan menjawab pertanyaan:
+> *"Bagaimana mengalokasikan modal ke sejumlah aset sehingga **risiko minimal** untuk target return tertentu?"*
+
+Semua model dalam aplikasi ini berlandaskan kerangka **Mean-Variance Optimization** yang
+diperkenalkan oleh Harry Markowitz (1952) dan dikembangkan dalam buku ajar AIMMS:
+
+> *AIMMS — Optimization Modeling, Chapter 18: Portfolio Selection*
+
+Setiap model memiliki asumsi dan pendekatan yang berbeda terhadap definisi "risiko":
+    """)
+
+    st.divider()
+
+    # ── 4 model cards ──
+    st.markdown("## Empat Model Optimasi")
+
+    m1, m2 = st.columns(2, gap="large")
+
+    with m1:
         st.markdown("""
-**Konsep:**
-Model Markowitz klasik — meminimalkan varians portofolio untuk target return tertentu.
-Expected return dan matriks kovarians **diambil otomatis dari Yahoo Finance**.
+### 1. Strategic Asset Allocation
+**Landasan:** Model Markowitz klasik (Mean-Variance)
 
-**Kapan digunakan:**
-Perencanaan jangka panjang (strategis) di mana ekspektasi return dan kovarians
-antar aset diestimasi dari data historis pasar nyata.
+Meminimalkan **varians portofolio** $\\sigma^2 = \\mathbf{x}^T \\Sigma \\mathbf{x}$ untuk target return $M$:
 
-**Input yang dibutuhkan (Sidebar):**
-| Input | Format | Contoh |
-|---|---|---|
-| Ticker Saham | Dipisahkan koma, kode Yahoo Finance | `BBCA.JK, BMRI.JK, TLKM.JK` |
-| Periode Data | Pilih dari dropdown | `2 tahun` |
+$$\\min_{x} \\ \\mathbf{x}^T \\Sigma \\mathbf{x} \\quad \\text{s.t.} \\quad \\boldsymbol{\\mu}^T \\mathbf{x} \\geq M, \\ \\mathbf{1}^T \\mathbf{x} = 1$$
 
-**Catatan:**
-- Ticker Indonesia menggunakan suffix `.JK` (contoh: `BBCA.JK`)
-- Ticker US tidak perlu suffix (contoh: `AAPL, MSFT, GOOGL`)
-- Klik **Ambil Data** untuk memuat data dari Yahoo Finance
+Matriks kovarians $\\Sigma$ dan expected return $\\boldsymbol{\\mu}$ **dihitung otomatis**
+dari data historis bulanan Yahoo Finance.
+
+**Output utama:** Efficient frontier (kurva Risk-Reward) & alokasi optimal per saham.
+        """)
+        st.markdown("""
+### 3. Downside Variance Optimization
+**Landasan:** Semi-variance / downside risk
+
+Hanya menghitung deviasi di **bawah** target return $M$ (kerugian), bukan total variance:
+
+$$\\min_{x,q} \\ \\sum_t p_t q_t^2 \\quad \\text{s.t.} \\quad r_t \\cdot x + q_t \\geq M, \\ q_t \\geq 0$$
+
+Cocok untuk investor yang lebih sensitif terhadap kerugian daripada gain.
         """)
 
-    with st.expander("Tactical Asset Allocation"):
+    with m2:
         st.markdown("""
-**Konsep:**
-Meminimalkan **variance aktual** berdasarkan data harga historis.
-Kovarians dihitung langsung dari data return historis (tidak perlu input manual).
+### 2. Tactical Asset Allocation
+**Landasan:** Mean-Variance dengan return historis langsung
 
-**Kapan digunakan:**
-Penyesuaian portofolio jangka pendek/menengah berdasarkan pergerakan harga historis.
+Meminimalkan **variance aktual** berdasarkan realisasi return historis $r_t$:
 
-**Input yang dibutuhkan (Sidebar):**
-| Input | Format | Contoh |
-|---|---|---|
-| Nama Aset | Dipisahkan koma | `RD, AKZ, KLM, PHI, UN` |
-| Data Harga Historis | Satu baris per periode, nilai koma | `111.0, 82.5, 70.0, ...` |
+$$\\min_{x} \\ \\sum_t p_t \\left( r_t \\cdot x - \\boldsymbol{\\mu} \\cdot x \\right)^2$$
+
+Tidak memerlukan estimasi matriks kovarians secara eksplisit — kovarians
+**diimplisitkan** dari data return historis.
+        """)
+        st.markdown("""
+### 4. Piecewise Linear / MILP
+**Landasan:** Aproksimasi piecewise linear dari fungsi kuadratik
+
+Fungsi kuadratik $q^2$ diaproksimasi dengan segmen-segmen linear lurus,
+lalu diselesaikan sebagai **MILP** (Mixed Integer Linear Program):
+
+$$q^2 \\approx \\sum_{l=1}^{K} s_l \\cdot u_l, \\quad u_l \\in [0, w_l]$$
+
+Jumlah segmen $K$ dihitung dinamis: $K = \\lceil q_{\\max} / 2\\sqrt{\\varepsilon} \\rceil$
         """)
 
-    with st.expander("Downside Variance Optimization"):
+    st.divider()
+
+    # ── Piecewise illustration ──
+    st.markdown("## Ilustrasi Aproksimasi Piecewise Linear (Figure 18.6)")
+    col_pw_ill, col_pw_txt = st.columns([1, 1], gap="large")
+    with col_pw_ill:
+        demo_qmax = 3.0
+        fig_demo = plot_piecewise_illustration(demo_qmax)
+        st.pyplot(fig_demo); plt.close(fig_demo)
+    with col_pw_txt:
         st.markdown("""
 **Konsep:**
-Meminimalkan **semi-variance** — hanya menghitung deviasi di **bawah** target return M.
-Berbeda dari variance biasa yang menghitung deviasi ke dua arah.
+Fungsi $q^2$ (kurva halus) diaproksimasi dengan garis-garis lurus per segmen.
 
-**Kapan digunakan:**
-Investor yang lebih sensitif terhadap **kerugian** daripada potensi gain,
-atau saat distribusi return tidak simetris.
+**I-bar** di setiap breakpoint menunjukkan **error aproksimasi** — selisih antara
+nilai kuadratik asli dan nilai piecewise linear.
 
-**Perbedaan dengan Tactical:**
-- Tactical: meminimalkan `Σ p_t (r_t·x - μ·x)²` (total variance)
-- Downside: meminimalkan `Σ p_t q_t²` di mana `q_t = max(0, M - r_t·x)` (downside only)
+**Rumus slope tiap segmen $l$:**
+$$s_l = q_{l-1} + q_l$$
+
+**Max error per segmen:**
+$$\\Delta_l = \\frac{(q_l - q_{l-1})^2}{4}$$
+
+**Dynamic interval** memilih $K$ terkecil sehingga $\\Delta_l \\leq \\varepsilon$.
+
+Semakin banyak segmen → error makin kecil, tapi model MILP makin berat.
         """)
 
-    with st.expander("Piecewise Linear / MILP (Exercise 18.3)"):
+    st.divider()
+
+    # ── Cara pakai ──
+    st.markdown("## Cara Menggunakan")
+    st.markdown("""
+1. Pilih salah satu **model** di navigasi atas
+2. Di sidebar, masukkan **ticker saham** (contoh: `BBCA.JK, BBRI.JK, TLKM.JK`)
+3. Pilih **periode data** (rekomendasi: 2–3 tahun untuk data yang cukup)
+4. Klik **Ambil Data dari Yahoo Finance**
+5. Geser **slider Target Return** untuk menjelajahi efficient frontier
+    """)
+
+    col_ex1, col_ex2 = st.columns(2)
+    with col_ex1:
         st.markdown("""
-**Konsep:**
-Mengaproksimasi fungsi kuadratik `q²` dengan fungsi **piecewise linear**,
-kemudian diselesaikan sebagai **MILP** (Mixed Integer Linear Program) menggunakan CBC solver.
-
-**Fitur tambahan:**
-- **Minimum investment:** setiap aset yang dipilih harus dialokasikan minimal X%
-- **Logical constraint:** jika alokasi RD > 20%, maka alokasi KLM harus < 30%
-- **Dynamic interval:** jumlah segmen piecewise dihitung otomatis berdasarkan ε
-
-**Rumus Dynamic Interval:**
-$$K = \\left\\lceil \\frac{q_{max}}{2\\sqrt{\\varepsilon}} \\right\\rceil$$
-        """)
-
-    with st.expander("Tips Umum"):
-        st.markdown("""
-**Format Data Harga (Tactical/Downside/Piecewise):**
-```
-111.0,82.5,70.0,154.6,110.8
-108.1,81.6,73.7,152.4,108.0
-...
-```
-- Setiap **baris** = satu periode waktu
-- Setiap **kolom** = satu aset
-- Urutan kolom harus sama dengan urutan nama aset
-
-**Masalah Umum:**
-| Masalah | Kemungkinan Penyebab |
+**Contoh ticker saham Indonesia:**
+| Saham | Ticker |
 |---|---|
-| "Tidak ada solusi feasible" | Target return terlalu tinggi |
-| Error membaca data | Spasi ekstra, baris kosong, atau koma ganda |
-| Hasil semua 0% | Degenerasi numerik — coba ubah target return |
+| Bank BCA | `BBCA.JK` |
+| Bank BRI | `BBRI.JK` |
+| Bank Mandiri | `BMRI.JK` |
+| Telkom | `TLKM.JK` |
+| Astra | `ASII.JK` |
+| BNI | `BBNI.JK` |
         """)
+    with col_ex2:
+        st.markdown("""
+**Contoh ticker saham US:**
+| Saham | Ticker |
+|---|---|
+| Apple | `AAPL` |
+| Microsoft | `MSFT` |
+| Google | `GOOGL` |
+| Amazon | `AMZN` |
+| Meta | `META` |
+| Tesla | `TSLA` |
+        """)
+
+    st.divider()
+    st.caption("Portfolio Optimization Suite | Berdasarkan AIMMS Chapter 18: Portfolio Selection | Powered by Yahoo Finance & PuLP")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1340,11 +1403,7 @@ else:  # Piecewise
 
     with col_pw:
         st.markdown("#### Piecewise Linear vs Kuadratik")
-        n_show = min(4, len(result_p["breaks"]) - 2)
-        fig_pw = plot_piecewise_illustration(
-            result_p["breaks"], result_p["slopes"], result_p["qmax"],
-            n_breakpoints_show=n_show,
-        )
+        fig_pw = plot_piecewise_illustration(result_p["qmax"])
         st.pyplot(fig_pw); plt.close(fig_pw)
 
     st.divider()
