@@ -642,7 +642,7 @@ elif mode.startswith("Strategic"):
         with col_cov:
             st.markdown("**Matriks Kovarians:**")
             st.dataframe(
-                pd.DataFrame(cov, columns=cats, index=cats).applymap(lambda x: f"{x:.4f}"),
+                pd.DataFrame(cov, columns=cats, index=cats).map(lambda x: f"{x:.4f}"),
                 use_container_width=True,
             )
 
@@ -923,7 +923,7 @@ elif mode.startswith("Tactical"):
         )
         st.markdown("#### Scenario Returns (10 Baris Pertama)")
         df_ret = pd.DataFrame(returns, columns=assets)
-        st.dataframe(df_ret.head(10).applymap(lambda x: f"{x:.4f}%"), use_container_width=True)
+        st.dataframe(df_ret.head(10).map(lambda x: f"{x:.4f}%"), use_container_width=True)
 
     with col_rec_t:
         st.markdown(f"#### Rekomendasi untuk M = {M_slider:.2f}%")
@@ -1100,7 +1100,7 @@ elif mode.startswith("Downside"):
         )
         st.markdown("#### Scenario Returns (10 Baris Pertama)")
         df_ret_d = pd.DataFrame(returns_d, columns=assets_d)
-        st.dataframe(df_ret_d.head(10).applymap(lambda x: f"{x:.4f}%"), use_container_width=True)
+        st.dataframe(df_ret_d.head(10).map(lambda x: f"{x:.4f}%"), use_container_width=True)
 
     with col_rec_d:
         st.markdown(f"#### Rekomendasi untuk M = {M_slider_d:.2f}%")
