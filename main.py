@@ -34,6 +34,75 @@ st.set_page_config(
     layout="wide",
 )
 
+# ── Responsive CSS: stack columns vertically on mobile ──
+st.markdown("""
+<style>
+/* Stack st.columns vertically on screens < 768px */
+@media (max-width: 768px) {
+    /* Stack all column children */
+    [data-testid="column"] {
+        width: 100% !important;
+        flex: 1 1 100% !important;
+        min-width: 100% !important;
+    }
+    /* Reduce main padding */
+    .block-container {
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+        padding-top: 1rem !important;
+    }
+    /* Larger tap targets for buttons */
+    .stButton > button {
+        min-height: 2.8rem !important;
+        font-size: 1rem !important;
+    }
+    /* Larger slider handle */
+    [data-testid="stSlider"] {
+        padding: 0.5rem 0 !important;
+    }
+    /* Make metric text smaller on mobile */
+    [data-testid="metric-container"] {
+        padding: 0.5rem !important;
+    }
+    [data-testid="metric-container"] label {
+        font-size: 0.75rem !important;
+    }
+    [data-testid="metric-container"] [data-testid="stMetricValue"] {
+        font-size: 1.2rem !important;
+    }
+    /* Full-width dataframe */
+    [data-testid="stDataFrame"] {
+        width: 100% !important;
+    }
+    /* Matplotlib charts: constrain width */
+    [data-testid="stImage"] img {
+        width: 100% !important;
+        height: auto !important;
+    }
+    /* Tabs full width */
+    [data-testid="stTabs"] {
+        width: 100% !important;
+    }
+    /* Radio horizontal → wrap */
+    [data-testid="stRadio"] > div {
+        flex-wrap: wrap !important;
+    }
+    /* Title smaller */
+    h1 { font-size: 1.5rem !important; }
+    h2 { font-size: 1.2rem !important; }
+    h3 { font-size: 1rem !important; }
+}
+
+/* Slightly more padding on tablet (768–1024px) */
+@media (min-width: 769px) and (max-width: 1024px) {
+    .block-container {
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
 COLORS = ['#4361EE', '#F72585', '#4CC9F0', '#7209B7', '#3A0CA3', '#560BAD']
 C_LINE  = '#4361EE'
 C_FILL  = '#4361EE'
