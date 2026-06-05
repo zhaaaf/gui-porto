@@ -463,7 +463,24 @@ def plot_piecewise_illustration(qmax):
 # ══════════════════════════════════════════════════════════════════════
 # SESSION STATE INIT
 # ══════════════════════════════════════════════════════════════════════
+PAGES = [
+    "Dashboard",
+    "Strategic Asset Allocation",
+    "Tactical Asset Allocation",
+    "Downside Variance Optimization",
+    "Piecewise Linear (MILP)",
+]
+
+PAGE_DESC = {
+    "Dashboard":                    "Penjelasan aplikasi & panduan",
+    "Strategic Asset Allocation":   "Markowitz klasik — kovarians eksplisit",
+    "Tactical Asset Allocation":    "Variance dari data return historis",
+    "Downside Variance Optimization": "Semi-variance — hanya risiko di bawah M",
+    "Piecewise Linear (MILP)":      "Aproksimasi MILP + logical constraint",
+}
+
 for k, v in {
+    "page": "Dashboard",
     "s_cats": None, "s_rets": None, "s_cov": None, "s_error": None,
     "t_assets": None, "t_prices": None, "t_error": None,
     "d_assets": None, "d_prices": None, "d_error": None,
@@ -473,21 +490,25 @@ for k, v in {
         st.session_state[k] = v
 
 # ══════════════════════════════════════════════════════════════════════
+# NAVIGASI SIDEBAR (selalu tampil di semua halaman)
+# ══════════════════════════════════════════════════════════════════════
+with st.sidebar:
+    st.markdown("## Navigasi")
+    for page_name in PAGES:
+        is_active = st.session_state["page"] == page_name
+        btn_type  = "primary" if is_active else "secondary"
+        if st.button(page_name, key=f"nav_{page_name}",
+                     use_container_width=True, type=btn_type):
+            st.session_state["page"] = page_name
+            st.rerun()
+    st.divider()
+
+mode = st.session_state["page"]
+
+# ══════════════════════════════════════════════════════════════════════
 # HEADER UTAMA
 # ══════════════════════════════════════════════════════════════════════
 st.title("Portfolio Optimization Suite")
-
-mode = st.radio(
-    "Navigasi:",
-    options=[
-        "Dashboard",
-        "Strategic Asset Allocation",
-        "Tactical Asset Allocation",
-        "Downside Variance Optimization",
-        "Piecewise Linear (MILP)",
-    ],
-    horizontal=True,
-)
 st.divider()
 
 
@@ -584,38 +605,10 @@ Jumlah segmen $K$ dihitung dinamis: $K = \\lceil q_{\\max} / 2\\sqrt{\\varepsilo
 
     st.divider()
 
-    # ── Piecewise illustration ──
-    st.markdown("## Ilustrasi Aproksimasi Piecewise Linear (Figure 18.6)")
-    col_pw_ill, col_pw_txt = st.columns([1, 1], gap="large")
-    with col_pw_ill:
-        demo_qmax = 3.0
-        fig_demo = plot_piecewise_illustration(demo_qmax)
-        st.pyplot(fig_demo); plt.close(fig_demo)
-    with col_pw_txt:
-        st.markdown("""
-**Konsep:**
-Fungsi $q^2$ (kurva halus) diaproksimasi dengan garis-garis lurus per segmen.
-
-**I-bar** di setiap breakpoint menunjukkan **error aproksimasi** — selisih antara
-nilai kuadratik asli dan nilai piecewise linear.
-
-**Rumus slope tiap segmen $l$:**
-$$s_l = q_{l-1} + q_l$$
-
-**Max error per segmen:**
-$$\\Delta_l = \\frac{(q_l - q_{l-1})^2}{4}$$
-
-**Dynamic interval** memilih $K$ terkecil sehingga $\\Delta_l \\leq \\varepsilon$.
-
-Semakin banyak segmen → error makin kecil, tapi model MILP makin berat.
-        """)
-
-    st.divider()
-
     # ── Cara pakai ──
     st.markdown("## Cara Menggunakan")
     st.markdown("""
-1. Pilih salah satu **model** di navigasi atas
+1. Pilih salah satu **model** dari panel navigasi di **sidebar kiri**
 2. Di sidebar, masukkan **ticker saham** (contoh: `BBCA.JK, BBRI.JK, TLKM.JK`)
 3. Pilih **periode data** (rekomendasi: 2–3 tahun untuk data yang cukup)
 4. Klik **Ambil Data dari Yahoo Finance**
