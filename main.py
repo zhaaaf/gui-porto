@@ -264,9 +264,33 @@ def ticker_selector(key_prefix: str, default_tickers: str) -> str:
 
     st.session_state[sel_key] = selected
 
-    # ── Ringkasan yang dipilih ──
+    # ── Ringkasan yang dipilih — chip dengan tombol ✕ ──
     if selected:
-        st.markdown(f"**Terpilih ({len(selected)}):** `{', '.join(selected)}`")
+        st.markdown(f"**Terpilih ({len(selected)}):**")
+        # Tampilkan dalam baris 3 kolom
+        remove_ticker = None
+        chunk_size = 3
+        for i in range(0, len(selected), chunk_size):
+            chunk = selected[i : i + chunk_size]
+            cols = st.columns(chunk_size)
+            for j, ticker in enumerate(chunk):
+                with cols[j]:
+                    if st.button(
+                        f"{ticker}  ✕",
+                        key=f"{key_prefix}_chip_{ticker}",
+                        use_container_width=True,
+                        help=f"Hapus {ticker} dari pilihan",
+                    ):
+                        remove_ticker = ticker
+        if remove_ticker:
+            selected.remove(remove_ticker)
+            st.session_state[sel_key] = selected
+            # Reset state checkbox agar sinkron
+            for ck in [f"{key_prefix}_pop_{remove_ticker}",
+                       f"{key_prefix}_sr_{remove_ticker}"]:
+                if ck in st.session_state:
+                    del st.session_state[ck]
+            st.rerun()
     else:
         st.warning("Belum ada saham dipilih.")
 
