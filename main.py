@@ -383,6 +383,69 @@ FREQ_OPTIONS = {
     "Harian":                   {"resample": None, "label": "hari",   "min_periods": 20},
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# SELEKSI SAHAM — Profil & Model Config
+# ══════════════════════════════════════════════════════════════════════
+
+PROFIL_INVESTOR = {
+    "Trader Harian": {
+        "icon": "⚡", "horizon": "< 1 minggu", "risk": "Sangat Tinggi",
+        "model": "Momentum + Calmar", "period_default": "6mo",
+        "desc": "Profit dari volatilitas harga jangka pendek. Butuh saham dengan tren kuat dan drawdown terkontrol.",
+    },
+    "Swing Trader": {
+        "icon": "📈", "horizon": "1–4 minggu", "risk": "Tinggi",
+        "model": "Sortino Ranking", "period_default": "1y",
+        "desc": "Manfaatkan tren 1–4 minggu. Fokus pada return per unit risiko kerugian (downside), bukan total volatilitas.",
+    },
+    "Investor Menengah": {
+        "icon": "🏦", "horizon": "3–12 bulan", "risk": "Sedang",
+        "model": "TOPSIS Multi-Criteria", "period_default": "2y",
+        "desc": "Keseimbangan antara growth dan perlindungan modal. Evaluasi saham dari banyak kriteria sekaligus.",
+    },
+    "Investor Jangka Panjang": {
+        "icon": "🌱", "horizon": "> 1 tahun", "risk": "Rendah",
+        "model": "Max Sharpe Contribution + Min Korelasi", "period_default": "3y",
+        "desc": "Bangun portofolio terdiversifikasi untuk jangka panjang. Pilih saham yang benar-benar memperbaiki kualitas portofolio.",
+    },
+}
+
+SELEKSI_MODELS = {
+    "Momentum + Calmar": {
+        "formula": "Mom = R(12bln) − R(1bln) | Calmar = μ_ann / |MaxDD|",
+        "desc": ("Momentum Carhart 1997: return 12 bulan dikurangi return 1 bulan terakhir (hindari short-term reversal), "
+                 "dikombinasi Calmar Ratio (return tahunan per unit drawdown terbesar). "
+                 "Pilih saham tren kuat dengan perlindungan drawdown."),
+        "cocok": ["Trader Harian"],
+    },
+    "Sortino Ranking": {
+        "formula": "Sortino = (μ − rf) / σ_down × √52",
+        "desc": ("Return per unit risiko downside saja. Lebih adil dari Sharpe karena volatilitas ke atas (gain) "
+                 "tidak dihukum — hanya deviasi di bawah rf yang dihitung sebagai risiko."),
+        "cocok": ["Swing Trader"],
+    },
+    "TOPSIS Multi-Criteria": {
+        "formula": "C* = d⁻ / (d⁺ + d⁻)",
+        "desc": ("Ranking multi-kriteria: Return, Sortino, Momentum, Max Drawdown. "
+                 "Skor = jarak ke solusi terburuk dibagi total jarak. "
+                 "Saham terbaik = paling dekat ideal, paling jauh anti-ideal. Bobot bisa disesuaikan."),
+        "cocok": ["Investor Menengah"],
+    },
+    "Max Sharpe Contribution + Min Korelasi": {
+        "formula": "Skor = 0.6 × ΔSharpe + 0.4 × (1 − ρ̄)",
+        "desc": ("Dua komponen: (1) seberapa besar saham meningkatkan Sharpe portfolio keseluruhan "
+                 "(Max Sharpe Contribution), (2) seberapa rendah rata-rata korelasinya dengan saham lain "
+                 "(Min Korelasi). Memaksimalkan diversifikasi nyata."),
+        "cocok": ["Investor Jangka Panjang"],
+    },
+}
+
+# Peta period_default (yfinance code) → label selectbox
+_PERIOD_CODE_TO_LABEL = {v: k for k, v in {
+    "6 bulan": "6mo", "1 tahun": "1y", "2 tahun": "2y",
+    "3 tahun": "3y",  "5 tahun": "5y",
+}.items()}
+
 def _get_close(tickers, period):
     """Helper: download & normalisasi kolom Close dari yfinance."""
     raw = yf.download(tickers, period=period, auto_adjust=True, progress=False)
@@ -438,6 +501,182 @@ def fetch_prices(tickers_str, period, freq_key="Mingguan (sesuai AIMMS)"):
         return available, close.values, None
     except Exception as e:
         return None, None, f"Error: {e}"
+
+# ══════════════════════════════════════════════════════════════════════
+# SELEKSI SAHAM — Helper Functions
+# ══════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_rf_us():
+    """Ambil US T-Bill 3-bulan (^IRX) sebagai risk-free rate untuk saham US."""
+    try:
+        raw = yf.download("^IRX", period="1mo", auto_adjust=True, progress=False)
+        if raw.empty:
+            return 0.0531, (1.0531) ** (1 / 52) - 1
+        rate = float(raw["Close"].iloc[-1]) / 100
+        return rate, (1 + rate) ** (1 / 52) - 1
+    except Exception:
+        return 0.0531, (1.0531) ** (1 / 52) - 1   # fallback 5.31%
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_universe_data(tickers_tuple, period, freq_key):
+    """Download harga seluruh universe sekaligus, resample, return DataFrame close."""
+    tickers  = list(tickers_tuple)
+    freq_cfg = FREQ_OPTIONS[freq_key]
+    try:
+        close, err = _get_close(tickers, period)
+        if err or close is None:
+            return None, err
+        if freq_cfg["resample"]:
+            close = close.resample(freq_cfg["resample"]).last()
+        return close.dropna(how="all"), None
+    except Exception as e:
+        return None, str(e)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_benchmark_ret(bench_ticker, period, freq_key):
+    """Return mingguan/bulanan benchmark (^JKSE atau ^GSPC) dalam persen."""
+    freq_cfg = FREQ_OPTIONS[freq_key]
+    try:
+        close, err = _get_close([bench_ticker], period)
+        if err or close is None:
+            return None
+        if freq_cfg["resample"]:
+            close = close.resample(freq_cfg["resample"]).last()
+        rets = close.dropna().pct_change().dropna() * 100
+        return rets.iloc[:, 0]
+    except Exception:
+        return None
+
+def _compute_metrics(close_df, freq_key, rf_map, bench_idx=None, bench_us=None):
+    """
+    Hitung semua metrik per saham dari DataFrame harga penutupan.
+    rf_map  : dict ticker → rf_weekly dalam persen
+    bench_idx / bench_us : pd.Series return benchmark (dalam %)
+    """
+    freq_cfg = FREQ_OPTIONS[freq_key]
+    min_warn = freq_cfg["min_periods"] * 4
+    rows = []
+
+    for ticker in close_df.columns:
+        prices = close_df[ticker].dropna()
+        if len(prices) < 10:
+            continue
+        rets = prices.pct_change().dropna() * 100
+        n    = len(rets)
+        if n < 5:
+            continue
+
+        rf_pct  = rf_map.get(ticker, 0.0)
+        mu_w    = rets.mean()
+        sig_w   = rets.std()
+        mu_ann  = mu_w  * 52
+        sig_ann = sig_w * np.sqrt(52)
+
+        excess  = rets - rf_pct
+        sharpe  = (excess.mean() / sig_w  * np.sqrt(52)) if sig_w  > 0 else 0.0
+
+        down    = rets[rets < rf_pct]
+        sig_dn  = down.std() if len(down) > 1 else sig_w
+        sortino = (excess.mean() / sig_dn * np.sqrt(52)) if sig_dn > 0 else 0.0
+
+        cum  = (1 + rets / 100).cumprod()
+        mdd  = float(((cum - cum.cummax()) / cum.cummax()).min()) * 100
+        calmar = (mu_ann / abs(mdd)) if mdd < -0.001 else 0.0
+
+        n52 = min(52, len(prices) - 1)
+        n4  = min(4,  len(prices) - 1)
+        if n52 > n4 > 0:
+            mom = (prices.iloc[-1] / prices.iloc[-n52] - 1) * 100 - \
+                  (prices.iloc[-1] / prices.iloc[-n4]  - 1) * 100
+        else:
+            mom = mu_ann
+
+        # Beta: IDX tickers vs ^JKSE, US vs ^GSPC
+        bench = bench_idx if ticker in IDX_POPULAR else bench_us
+        beta  = None
+        if bench is not None:
+            aligned = pd.concat([rets, bench], axis=1).dropna()
+            if len(aligned) > 10:
+                cv   = np.cov(aligned.iloc[:, 0].values, aligned.iloc[:, 1].values)
+                beta = float(cv[0, 1] / cv[1, 1]) if cv[1, 1] > 0 else None
+
+        rows.append({
+            "Ticker":          ticker,
+            "Return/thn (%)":  round(mu_ann,  2),
+            "Vol/thn (%)":     round(sig_ann, 2),
+            "Sharpe":          round(sharpe,  3),
+            "Sortino":         round(sortino, 3),
+            "Calmar":          round(calmar,  3),
+            "Max DD (%)":      round(mdd,     2),
+            "Momentum (%)":    round(mom,     2),
+            "Beta":            round(beta, 3) if beta is not None else None,
+            "N Obs":           n,
+            "_warning":        n < min_warn,
+            "_rets":           rets,
+        })
+    return rows
+
+# ── Scoring functions ──
+
+def _norm01(arr):
+    arr = np.array(arr, dtype=float)
+    rng = arr.max() - arr.min()
+    return (arr - arr.min()) / rng if rng > 0 else np.full(len(arr), 0.5)
+
+def _score_momentum_calmar(rows):
+    mom = np.array([r["Momentum (%)"] for r in rows], dtype=float)
+    cal = np.array([r["Calmar"]        for r in rows], dtype=float)
+    return 0.6 * _norm01(mom) + 0.4 * _norm01(cal)
+
+def _score_sortino(rows):
+    return np.array([r["Sortino"] for r in rows], dtype=float)
+
+def _score_topsis(rows, weights):
+    """TOPSIS — semua kolom diperlakukan benefit (higher=better).
+    Max DD (%) sudah negatif: -5% > -30%, jadi higher = less drawdown = better."""
+    cols = ["Return/thn (%)", "Sortino", "Momentum (%)", "Max DD (%)"]
+    w    = np.array([weights.get(c, 0.25) for c in cols])
+    X    = np.array([[r[c] if r[c] is not None else 0.0 for c in cols]
+                     for r in rows], dtype=float)
+    for j in range(X.shape[1]):
+        mask = np.isnan(X[:, j])
+        if mask.any():
+            X[mask, j] = np.nanmean(X[:, j])
+    norms = np.sqrt((X ** 2).sum(axis=0))
+    norms[norms == 0] = 1
+    Xw     = (X / norms) * w
+    ideal  = Xw.max(axis=0)
+    anti   = Xw.min(axis=0)
+    d_pos  = np.sqrt(((Xw - ideal) ** 2).sum(axis=1))
+    d_neg  = np.sqrt(((Xw - anti)  ** 2).sum(axis=1))
+    denom  = d_pos + d_neg
+    return np.where(denom > 0, d_neg / denom, 0.5)
+
+def _score_max_sharpe_min_corr(rows, rf_weighted_pct):
+    """Max Sharpe Contribution (60%) + Min Korelasi (40%)."""
+    tickers  = [r["Ticker"] for r in rows]
+    rets_all = pd.concat([r["_rets"] for r in rows],
+                         axis=1, keys=tickers).dropna()
+    if rets_all.shape[0] < 10 or rets_all.shape[1] < 2:
+        return _norm01([r["Sharpe"] for r in rows])
+
+    port_eq = rets_all.mean(axis=1)
+    rf_use  = rf_weighted_pct   # scalar — use one value for ranking
+    s_base  = (port_eq.mean() - rf_use) / port_eq.std() if port_eq.std() > 0 else 0.0
+
+    contrib = []
+    for t in tickers:
+        others = [c for c in tickers if c != t]
+        if not others:
+            contrib.append(0.0)
+            continue
+        po   = rets_all[others].mean(axis=1)
+        s_wo = (po.mean() - rf_use) / po.std() if po.std() > 0 else 0.0
+        contrib.append(float(s_base - s_wo))
+
+    corr_score = (1.0 - rets_all.corr().mean()).values
+    return 0.6 * _norm01(np.array(contrib)) + 0.4 * _norm01(corr_score)
 
 # ══════════════════════════════════════════════════════════════════════
 # MODEL STRATEGIC
@@ -742,6 +981,7 @@ def plot_piecewise_illustration(qmax, breaks_actual=None, slopes_actual=None):
 # ══════════════════════════════════════════════════════════════════════
 PAGES = [
     "Dashboard",
+    "Seleksi Saham",
     "Strategic Asset Allocation",
     "Tactical Asset Allocation",
     "Downside Variance Optimization",
@@ -749,11 +989,12 @@ PAGES = [
 ]
 
 PAGE_DESC = {
-    "Dashboard":                    "Penjelasan aplikasi & panduan",
-    "Strategic Asset Allocation":   "Markowitz klasik — kovarians eksplisit",
-    "Tactical Asset Allocation":    "Variance dari data return historis",
+    "Dashboard":                      "Penjelasan aplikasi & panduan",
+    "Seleksi Saham":                  "Pilih saham terbaik sesuai profil investor",
+    "Strategic Asset Allocation":     "Markowitz klasik — kovarians eksplisit",
+    "Tactical Asset Allocation":      "Variance dari data return historis",
     "Downside Variance Optimization": "Semi-variance — hanya risiko di bawah M",
-    "Piecewise Linear (MILP)":      "Aproksimasi MILP + logical constraint",
+    "Piecewise Linear (MILP)":        "Aproksimasi MILP + logical constraint",
 }
 
 for k, v in {
@@ -926,6 +1167,303 @@ Jumlah segmen $K$ dihitung dinamis: $K = \\lceil q_{\\max} / 2\\sqrt{\\varepsilo
 
     st.divider()
     st.caption("Portfolio Optimization Suite | Berdasarkan AIMMS Chapter 18: Portfolio Selection | Powered by Yahoo Finance & PuLP")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SELEKSI SAHAM
+# ══════════════════════════════════════════════════════════════════════
+elif mode == "Seleksi Saham":
+
+    with st.sidebar:
+        st.header("Input — Seleksi Saham")
+
+        profil_key = st.radio(
+            "Profil Investor",
+            options=list(PROFIL_INVESTOR.keys()),
+            index=2,
+            key="sel_profil",
+            help="Pilih profil untuk mendapat rekomendasi model seleksi otomatis.",
+        )
+        p_cfg = PROFIL_INVESTOR[profil_key]
+
+        universe_choice = st.radio(
+            "Universe Saham",
+            ["IDX (Indonesia)", "US (Amerika)", "Keduanya"],
+            key="sel_universe",
+        )
+
+        st.divider()
+
+        default_period_lbl = _PERIOD_CODE_TO_LABEL.get(p_cfg["period_default"], "2 tahun")
+        period_sel = st.selectbox(
+            "Periode Data",
+            options=list(PERIOD_OPTIONS.keys()),
+            index=list(PERIOD_OPTIONS.keys()).index(default_period_lbl)
+                  if default_period_lbl in PERIOD_OPTIONS else 2,
+            key="sel_period",
+        )
+        st.selectbox("Frekuensi Data", options=list(FREQ_OPTIONS.keys()), key="global_freq")
+
+        st.divider()
+        st.markdown("**Risk-Free Rate**")
+        bi_rate_input = st.number_input(
+            "BI Rate IDX (%/tahun)",
+            min_value=0.0, max_value=20.0, value=5.75, step=0.25,
+            key="sel_birate",
+            help="BI Rate 7DRR sebagai proxy rf untuk saham IDX. Update manual jika BI mengubah rate.",
+        )
+
+        st.divider()
+
+        rec_model  = p_cfg["model"]
+        model_sel  = st.selectbox(
+            "Model Seleksi",
+            options=list(SELEKSI_MODELS.keys()),
+            index=list(SELEKSI_MODELS.keys()).index(rec_model),
+            key="sel_model",
+            help="Dipilih otomatis sesuai profil — bisa diubah bebas.",
+        )
+
+        topsis_w = {"Return/thn (%)": 0.30, "Sortino": 0.30,
+                    "Momentum (%)":   0.20, "Max DD (%)": 0.20}
+        if model_sel == "TOPSIS Multi-Criteria":
+            with st.expander("Sesuaikan Bobot TOPSIS"):
+                wr  = st.slider("Return (%)",       0, 100, 30, key="tw_r")
+                ws  = st.slider("Sortino",          0, 100, 30, key="tw_s")
+                wm  = st.slider("Momentum (%)",     0, 100, 20, key="tw_m")
+                wdd = st.slider("Max Drawdown (%)", 0, 100, 20, key="tw_d")
+                tot = wr + ws + wm + wdd or 1
+                topsis_w = {
+                    "Return/thn (%)": wr / tot, "Sortino":     ws  / tot,
+                    "Momentum (%)":   wm / tot, "Max DD (%)":  wdd / tot,
+                }
+
+        top_n   = st.slider("Sorot Top N Saham", 3, 15, 8, key="sel_topn")
+        st.divider()
+        run_btn = st.button("Jalankan Seleksi", use_container_width=True,
+                            type="primary", key="sel_run")
+
+    # ── Header ──
+    st.subheader("Seleksi Saham")
+    st.caption("Model memberikan **saran** ranking — kamu tetap bebas memilih saham apapun untuk optimisasi.")
+
+    col_pc, col_mc = st.columns(2, gap="large")
+    with col_pc:
+        is_rec_str = "✓ Direkomendasikan" if model_sel == rec_model else "ⓘ Berbeda dari rekomendasi"
+        st.markdown(f"**{p_cfg['icon']} {profil_key}**  \nHorizon: `{p_cfg['horizon']}` | Risiko: `{p_cfg['risk']}`\n\n{p_cfg['desc']}")
+    with col_mc:
+        m_cfg = SELEKSI_MODELS[model_sel]
+        st.markdown(f"**Model: {model_sel}** — _{is_rec_str}_\n\n`{m_cfg['formula']}`\n\n{m_cfg['desc']}")
+
+    st.divider()
+
+    # ── Risk-free rate ──
+    rf_idx_w = (1 + bi_rate_input / 100) ** (1 / 52) - 1
+    with st.spinner("Mengambil US T-Bill rate..."):
+        rf_us_ann, rf_us_w = fetch_rf_us()
+
+    col_ri, col_ru = st.columns(2)
+    col_ri.info(f"**rf IDX (BI Rate):** {bi_rate_input:.2f}%/thn = **{rf_idx_w*100:.4f}%/minggu**")
+    col_ru.info(f"**rf US (^IRX T-Bill):** {rf_us_ann*100:.2f}%/thn = **{rf_us_w*100:.4f}%/minggu**")
+
+    # ── Universe setup ──
+    if universe_choice == "IDX (Indonesia)":
+        all_tickers  = list(IDX_POPULAR.keys())
+        bench_idx_t  = "^JKSE"
+        bench_us_t   = None
+        rf_map_base  = {t: rf_idx_w * 100 for t in all_tickers}
+    elif universe_choice == "US (Amerika)":
+        all_tickers  = list(US_POPULAR.keys())
+        bench_idx_t  = None
+        bench_us_t   = "^GSPC"
+        rf_map_base  = {t: rf_us_w * 100 for t in all_tickers}
+    else:
+        all_tickers  = list(IDX_POPULAR.keys()) + list(US_POPULAR.keys())
+        bench_idx_t  = "^JKSE"
+        bench_us_t   = "^GSPC"
+        rf_map_base  = {t: rf_idx_w * 100 for t in IDX_POPULAR}
+        rf_map_base.update({t: rf_us_w * 100 for t in US_POPULAR})
+        st.caption("ⓘ Universe gabungan: rf IDX untuk saham Indonesia, rf US untuk saham Amerika.")
+
+    # ── Run ──
+    if run_btn:
+        period_code = PERIOD_OPTIONS[period_sel]
+        with st.spinner(f"Mengunduh data {len(all_tickers)} saham..."):
+            close_df, err = fetch_universe_data(tuple(all_tickers), period_code, freq_key)
+        if err or close_df is None:
+            st.error(f"Gagal mengambil data: {err}")
+            st.stop()
+
+        with st.spinner("Mengunduh data benchmark..."):
+            b_idx = fetch_benchmark_ret(bench_idx_t, period_code, freq_key) if bench_idx_t else None
+            b_us  = fetch_benchmark_ret(bench_us_t,  period_code, freq_key) if bench_us_t  else None
+
+        with st.spinner("Menghitung metrik..."):
+            rows = _compute_metrics(close_df, freq_key, rf_map_base, b_idx, b_us)
+
+        if not rows:
+            st.error("Tidak ada saham dengan data yang cukup.")
+            st.stop()
+
+        if model_sel == "Momentum + Calmar":
+            scores = _score_momentum_calmar(rows)
+        elif model_sel == "Sortino Ranking":
+            scores = _score_sortino(rows)
+        elif model_sel == "TOPSIS Multi-Criteria":
+            scores = _score_topsis(rows, topsis_w)
+        else:
+            rf_for_score = (sum(rf_map_base.values()) / len(rf_map_base)) if rf_map_base else 0.0
+            scores = _score_max_sharpe_min_corr(rows, rf_for_score)
+
+        for i, r in enumerate(rows):
+            r["_score"] = float(scores[i]) if i < len(scores) else 0.0
+
+        rows_sorted = sorted(rows, key=lambda x: x["_score"], reverse=True)
+        st.session_state["sel_results"] = rows_sorted
+        st.session_state["sel_chosen"]  = {r["Ticker"] for r in rows_sorted[:top_n]}
+        st.toast(f"Selesai — {len(rows_sorted)} saham dianalisis", icon="✅")
+        st.rerun()
+
+    # ── Show results ──
+    if "sel_results" not in st.session_state:
+        st.info("Konfigurasikan profil di sidebar lalu klik **Jalankan Seleksi**.")
+        st.stop()
+
+    rows_sorted = st.session_state["sel_results"]
+    chosen      = set(st.session_state.get("sel_chosen",
+                       {r["Ticker"] for r in rows_sorted[:top_n]}))
+
+    # Results table
+    st.subheader(f"Hasil Seleksi — {model_sel}")
+    disp = []
+    for rank, r in enumerate(rows_sorted, 1):
+        disp.append({
+            "Rank":           rank,
+            "Ticker":         r["Ticker"] + (" ⚠️" if r["_warning"] else ""),
+            "Return/thn (%)": r["Return/thn (%)"],
+            "Vol/thn (%)":    r["Vol/thn (%)"],
+            "Sharpe":         r["Sharpe"],
+            "Sortino":        r["Sortino"],
+            "Calmar":         r["Calmar"],
+            "Max DD (%)":     r["Max DD (%)"],
+            "Momentum (%)":   r["Momentum (%)"],
+            "Beta":           r["Beta"] if r["Beta"] is not None else "-",
+            "N Obs":          r["N Obs"],
+            "Skor":           round(r["_score"], 3),
+        })
+
+    df_res = pd.DataFrame(disp)
+    st.dataframe(
+        df_res, use_container_width=True, hide_index=True,
+        column_config={
+            "Skor": st.column_config.ProgressColumn(
+                min_value=0, max_value=float(df_res["Skor"].max() or 1), format="%.3f"
+            ),
+            "Return/thn (%)": st.column_config.NumberColumn(format="%.2f"),
+            "Vol/thn (%)":    st.column_config.NumberColumn(format="%.2f"),
+            "Max DD (%)":     st.column_config.NumberColumn(format="%.2f"),
+            "Momentum (%)":   st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
+    if any(r["_warning"] for r in rows_sorted):
+        st.warning("⚠️ Saham bertanda ini memiliki data di bawah minimum yang direkomendasikan — estimasi metrik kurang reliable, tapi tetap bisa dipilih.")
+
+    st.divider()
+
+    # Chart + Pilihan
+    col_chart, col_sel = st.columns([3, 2], gap="large")
+
+    with col_chart:
+        st.markdown("#### Peta Risk–Return")
+        top_set = {r["Ticker"] for r in rows_sorted[:top_n]}
+        fig_s, ax_s = plt.subplots(figsize=(7, 5))
+        for r in rows_sorted:
+            is_top = r["Ticker"] in top_set
+            ax_s.scatter(r["Vol/thn (%)"], r["Return/thn (%)"],
+                color=C_GOLD if is_top else "#cbd5e1",
+                s=90 if is_top else 40, zorder=3 if is_top else 2,
+                edgecolors="white" if is_top else "none", linewidths=1.5)
+            if is_top:
+                ax_s.annotate(r["Ticker"], (r["Vol/thn (%)"], r["Return/thn (%)"]),
+                    xytext=(5, 5), textcoords="offset points",
+                    fontsize=8, fontweight="bold", color="#1e293b")
+        ax_s.axhline(0, color="#94a3b8", lw=0.8, ls="--")
+        ax_s.set_xlabel("Volatilitas/tahun (%)", fontsize=10, fontweight="bold")
+        ax_s.set_ylabel("Return/tahun (%)",       fontsize=10, fontweight="bold")
+        ax_s.set_title(f"Peta Risk–Return (Top {top_n} disorot)", fontsize=11, fontweight="bold")
+        ax_s.spines["top"].set_visible(False); ax_s.spines["right"].set_visible(False)
+        fig_s.tight_layout(); st.pyplot(fig_s); plt.close(fig_s)
+
+    with col_sel:
+        st.markdown("#### Pilih Saham")
+        st.caption(f"Top {top_n} sudah tercentang. Ubah bebas sesuai keinginanmu.")
+        new_chosen = set()
+        for rank, r in enumerate(rows_sorted, 1):
+            t   = r["Ticker"]
+            lbl = f"**#{rank} {t}** — {r['_score']:.3f}" + (" ⚠️" if r["_warning"] else "")
+            if st.checkbox(lbl, value=(t in chosen), key=f"selchk_{t}"):
+                new_chosen.add(t)
+        st.session_state["sel_chosen"] = new_chosen
+        chosen = new_chosen
+
+        st.markdown("---")
+        st.caption("Tambah manual (di luar universe di atas):")
+        manual_str = st.text_input(
+            "Ticker manual", placeholder="cth: BBCA.JK, NVDA",
+            key="sel_manual_txt",
+            label_visibility="collapsed",
+        )
+
+    # ── Final selection + chips + transfer ──
+    st.divider()
+    manual_extra = [t.strip().upper() for t in (manual_str or "").split(",") if t.strip()]
+    final_list   = list(chosen) + [t for t in manual_extra if t not in chosen]
+
+    if final_list:
+        st.markdown(f"**Terpilih ({len(final_list)}):**")
+        rm_t = None
+        for i in range(0, len(final_list), 3):
+            chunk = final_list[i:i + 3]
+            cols  = st.columns(3)
+            for j, t in enumerate(chunk):
+                with cols[j]:
+                    if st.button(f"{t}  ✕", key=f"selrm_{t}", use_container_width=True):
+                        rm_t = t
+        if rm_t:
+            chosen.discard(rm_t)
+            st.session_state["sel_chosen"] = chosen
+            st.rerun()
+
+        st.divider()
+        st.markdown("**Kirim ke halaman Optimisasi:**")
+        col_t1, col_t2, col_t3, col_t4 = st.columns(4)
+
+        def _transfer(prefix, page, data_keys):
+            st.session_state[f"{prefix}_selected_tickers"] = list(final_list)
+            for k in data_keys:
+                st.session_state[k] = None
+            st.session_state["page"] = page
+            st.rerun()
+
+        if col_t1.button("→ Strategic",  use_container_width=True, key="goto_s"):
+            _transfer("s", "Strategic Asset Allocation",
+                      ["s_cats", "s_rets", "s_cov", "s_error"])
+        if col_t2.button("→ Tactical",   use_container_width=True, key="goto_t"):
+            _transfer("t", "Tactical Asset Allocation",
+                      ["t_assets", "t_prices", "t_error"])
+        if col_t3.button("→ Downside",   use_container_width=True, key="goto_d"):
+            _transfer("d", "Downside Variance Optimization",
+                      ["d_assets", "d_prices", "d_error"])
+        if col_t4.button("→ Piecewise",  use_container_width=True, key="goto_p"):
+            _transfer("p", "Piecewise Linear (MILP)",
+                      ["p_assets", "p_prices", "p_error"])
+
+        st.caption(f"Akan dikirim: **{', '.join(final_list)}**")
+    else:
+        st.warning("Belum ada saham dipilih. Centang dari hasil di atas atau tambah manual.")
+
+    st.divider()
+    st.caption("Seleksi Saham | Semua model bersifat saran — keputusan akhir ada di tangan investor.")
 
 
 # ══════════════════════════════════════════════════════════════════════
